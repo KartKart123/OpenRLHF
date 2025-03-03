@@ -284,7 +284,7 @@ class PPOTrainer(ABC):
             )
             for experience in pbar:
                 experience.to_device(device)
-                status = self.training_step(experience, global_steps)
+                status = self.training_step(experience, global_steps, epoch)
 
                 # for DP
                 # weighted mean for kl
@@ -327,21 +327,24 @@ class PPOTrainer(ABC):
         torch.cuda.empty_cache()
         return status_mean
 
-    def training_step(self, experience: Experience, global_steps) -> Dict[str, float]:
+    def training_step(self, experience: Experience, global_steps, epoch: int) -> Dict[str, float]:
         status = {}
         if global_steps > self.freezing_actor_steps:
-            status = self.training_step_actor(experience)
+            status = self.training_step_actor(experience, epoch)
         if self.critic is not None:
             status.update(self.training_step_critic(experience))
         return status
 
-    def training_step_actor(self, experience: Experience) -> Dict[str, float]:
+    def training_step_actor(self, experience: Experience, epoch: int) -> Dict[str, float]:
+        print("EPOCH", epoch)
         self.actor.train()
 
         # TODO: this is a bad indicator to say that data is packed...
         if isinstance(experience.sequences, list):
+            print("data is packed")
             sequences = torch.cat(experience.sequences, dim=0).unsqueeze(0)
-            old_action_log_probs = torch.cat(experience.action_log_probs, dim=0).unsqueeze(0)
+            if epoch > 0:
+                old_action_log_probs = torch.cat(experience.action_log_probs, dim=0).unsqueeze(0)
             advantages = torch.cat(experience.advantages, dim=0).unsqueeze(0)
             num_actions = [v.numel() for v in experience.advantages]
             packed_seq_lens = [s.numel() for s in experience.sequences]
@@ -360,6 +363,7 @@ class PPOTrainer(ABC):
             if self.args.use_kl_loss and experience.base_action_log_probs is not None:
                 base_action_log_probs = torch.cat(experience.base_action_log_probs, dim=0).unsqueeze(0)
         else:
+            print("data is not packed")
             sequences = experience.sequences
             old_action_log_probs = experience.action_log_probs
             advantages = experience.advantages
@@ -379,6 +383,10 @@ class PPOTrainer(ABC):
             logps_allgather=True,
             packed_seq_lens=packed_seq_lens,
         )
+        if epoch == 0: # ONLY FOR GRPO
+            print("EPOCH 0")
+            experience.action_log_probs = action_log_probs.detach()
+            old_action_log_probs = experience.action_log_probs
         # unpad sequence ensures that pad tokens do not contribute to the loss calculation.
         if self.strategy.ring_attn_group is not None:
             assert pad_len is not None

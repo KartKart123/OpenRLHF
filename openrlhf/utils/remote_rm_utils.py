@@ -15,7 +15,7 @@ def request_api_wrapper(url, data, score_key="rewards", try_max_times=5):
     }
     for _ in range(try_max_times):
         try:
-            response = requests.post(url=url, json=data, headers=headers, timeout=180)
+            response = requests.post(url=url, json=data, headers=headers, timeout=600)
             response.raise_for_status()  # Raise an HTTPError for bad responses
             response = response.json()
             assert score_key in response, f"{score_key} not in {response}"

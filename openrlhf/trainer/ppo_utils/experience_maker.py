@@ -123,7 +123,6 @@ class Samples:
     prompts: list[str]
     labels: list[str]
     pad_len: Optional[int]
-    vllm_action_log_probs: Optional[torch.Tensor]
 
 
 class NaiveExperienceMaker(ABC):
@@ -603,7 +602,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         action_mask = samples.action_mask
         num_actions = samples.num_actions
         packed_seq_lens = samples.packed_seq_lens
-        vllm_action_log_probs = samples.vllm_action_log_probs
         start = time.time()
         sequences_cpu, attention_mask_cpu = (
             sequences.to("cpu"),
@@ -670,15 +668,17 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             ray.get([self.reward_model[0].empty_cache.remote()])
 
         # log probs
-        action_log_probs = self.actor(
-            sequences,
-            num_actions,
-            attention_mask,
-            ring_attn_group=self.strategy.ring_attn_group,
-            logps_allgather=True,
-            packed_seq_lens=packed_seq_lens,
-        )
-        print(f"[Experience Maker] Relative error: {torch.norm(action_log_probs - vllm_action_log_probs) / torch.norm(action_log_probs)}")
+        if args.use_kl_loss:
+            action_log_probs = self.actor(
+                sequences,
+                num_actions,
+                attention_mask,
+                ring_attn_group=self.strategy.ring_attn_group,
+                logps_allgather=True,
+                packed_seq_lens=packed_seq_lens,
+            )
+        else:
+            action_log_probs = torch.zeros_like(sequences, dtype=torch.float)
         actor_value_rm_time = time.time() - start
 
         # wait initial/critic/reward model done
@@ -794,7 +794,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             min_tokens=kwargs.get("min_new_tokens", 1),
             skip_special_tokens=kwargs.get("skip_special_tokens", False),
             include_stop_str_in_output=True,
-            logprobs=1
+            # logprobs=1
         )
 
         # Expand prompt list based on the number of samples per prompt
@@ -884,15 +884,15 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 packed_seq_lens = []
                 attention_mask = []
                 num_actions = []
-                logprobs = []
+                # logprobs = []
                 for i, output in enumerate(outputs):
                     input_len = len(output.prompt_token_ids)
                     output_len = len(output.outputs[0].token_ids)
                     packed_seq_lens.append(input_len + output_len)
                     sequences.extend(output.prompt_token_ids + list(output.outputs[0].token_ids))
                     attention_mask.extend([i + 1] * (input_len + output_len))
-                    print(f"[Experience Maker] logprobs: {output.outputs[0].logprobs[-5:]}")
-                    logprobs.extend([list(entry.values())[0].logprob for entry in output.outputs[0].logprobs])
+                    # print(f"[Experience Maker] logprobs: {output.outputs[0].logprobs[-5:]}")
+                    # logprobs.extend([list(entry.values())[0].logprob for entry in output.outputs[0].logprobs])
                     # current_action_mask = [0] * (input_len - 1) + [1] * output_len + [0]
                     # num_actions.append(max(1, sum(current_action_mask)))
                     num_actions.append(max(1, output_len))
@@ -911,7 +911,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
 
                 sequences = torch.tensor(sequences, device="cuda").unsqueeze(0)
                 attention_mask = torch.tensor(attention_mask, device="cuda").unsqueeze(0)
-                vllm_action_log_probs = torch.tensor(logprobs, device="cuda", dtype=torch.float).unsqueeze(0)
                 action_mask = None
                 response_length = torch.tensor(num_actions, device="cuda", dtype=torch.float)
                 total_length = torch.tensor(packed_seq_lens, device="cuda", dtype=torch.float)
@@ -927,7 +926,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         prompts=prompts,
                         labels=labels,
                         pad_len=pad_len,
-                        vllm_action_log_probs=vllm_action_log_probs,
                     )
                 )
         return samples_list

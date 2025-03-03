@@ -176,8 +176,8 @@ class ActorPPOTrainer(PPOTrainer):
 
         return status
 
-    def training_step(self, experience: Experience, global_steps) -> Dict[str, float]:
-        return self.training_step_actor(experience)
+    def training_step(self, experience: Experience, global_steps, epoch: int) -> Dict[str, float]:
+        return self.training_step_actor(experience, epoch)
 
     def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
