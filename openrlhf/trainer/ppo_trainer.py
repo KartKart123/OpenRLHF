@@ -262,6 +262,7 @@ class PPOTrainer(ABC):
             self._tensorboard.close()
 
     def ppo_train(self, global_steps=0):
+        print(f"[PPO Trainer] Running PPO_train")
         torch.cuda.empty_cache()
         # replay buffer may be empty at first, we should rebuild at each training
         dataloader = DataLoader(
@@ -336,12 +337,11 @@ class PPOTrainer(ABC):
         return status
 
     def training_step_actor(self, experience: Experience, epoch: int) -> Dict[str, float]:
-        print("EPOCH", epoch)
+        print(f"[PPO Trainer] Running actor training step. Epoch: {epoch}")
         self.actor.train()
 
         # TODO: this is a bad indicator to say that data is packed...
         if isinstance(experience.sequences, list):
-            print("data is packed")
             sequences = torch.cat(experience.sequences, dim=0).unsqueeze(0)
             if epoch > 0:
                 old_action_log_probs = torch.cat(experience.action_log_probs, dim=0).unsqueeze(0)
@@ -363,7 +363,6 @@ class PPOTrainer(ABC):
             if self.args.use_kl_loss and experience.base_action_log_probs is not None:
                 base_action_log_probs = torch.cat(experience.base_action_log_probs, dim=0).unsqueeze(0)
         else:
-            print("data is not packed")
             sequences = experience.sequences
             old_action_log_probs = experience.action_log_probs
             advantages = experience.advantages
@@ -374,6 +373,7 @@ class PPOTrainer(ABC):
                 base_action_log_probs = experience.base_action_log_probs
 
         # actor loss
+        print("[PPO Trainer] Running actor forward pass")
         action_log_probs, output = self.actor(
             sequences,
             num_actions,
@@ -384,7 +384,7 @@ class PPOTrainer(ABC):
             packed_seq_lens=packed_seq_lens,
         )
         if epoch == 0: # ONLY FOR GRPO
-            print("EPOCH 0")
+            # self.strategy.print("EPOCH 0 SAVING LOG PROBS")
             experience.action_log_probs = action_log_probs.detach()
             old_action_log_probs = experience.action_log_probs
         # unpad sequence ensures that pad tokens do not contribute to the loss calculation.
@@ -401,6 +401,7 @@ class PPOTrainer(ABC):
             )
 
         # loss function
+        print("[PPO Trainer] Running actor loss function")
         actor_loss = self.actor_loss_fn(
             action_log_probs,
             old_action_log_probs,
@@ -439,6 +440,7 @@ class PPOTrainer(ABC):
         else:
             aux_loss = 0
         loss = actor_loss + aux_loss * self.args.aux_loss_coef + kl_loss * self.kl_ctl.value
+        print("[PPO Trainer] Running actor backward pass")
         self.strategy.backward(loss, self.actor, self.actor_optim)
 
         # ptx loss
@@ -465,6 +467,7 @@ class PPOTrainer(ABC):
             loss = ptx_loss + aux_loss * self.args.aux_loss_coef
             self.strategy.backward(self.ptx_coef * loss, self.actor, self.actor_optim)
 
+        print("[PPO Trainer] Running actor optimizer step")
         self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
         if self.ema_model:
             self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, "cuda")

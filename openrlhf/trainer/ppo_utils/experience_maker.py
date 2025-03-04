@@ -201,6 +201,7 @@ class NaiveExperienceMaker(ABC):
         After that, we will calculate the advantages and returns for each experience.
         """
         args = self.strategy.args
+        print(f"[Experience Maker] Running make_experience_list")
 
         # vLLM wakeup when vllm_enable_sleep
         if self.strategy.args.vllm_enable_sleep:
@@ -234,6 +235,7 @@ class NaiveExperienceMaker(ABC):
         torch.distributed.barrier()
         torch.cuda.synchronize()
 
+        print(f"[Experience Maker] Running make_experience")
         experiences = []
         for samples in tqdm(
             samples_list,
@@ -288,6 +290,7 @@ class NaiveExperienceMaker(ABC):
             experience.kl = None
             del experience.info["num_actions"]
             experience.to_device("cpu")
+        print(f"[Experience Maker] Finished making experience_list")
         return experiences
 
     @torch.no_grad()
@@ -655,6 +658,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     offset += length
                 queries = self.tokenizer.batch_decode(sequences_list, skip_special_tokens=False)
 
+            print(f"[Experience Maker] Running custom reward function")
             if self.custom_reward_func:
                 r = self.custom_reward_func.remote(queries, samples.prompts, samples.labels)
                 r_refs.append(r)
@@ -662,7 +666,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 for rm in self.remote_rm_url:
                     r = remote_rm_fn_ray.remote(rm, queries=queries, prompts=samples.prompts, labels=samples.labels)
                     r_refs.append(r)
-
+        print(f"[Experience Maker] Finished running remote reward function")
         if args.colocate_all_models and not self.remote_rm_url:
             ray.get(r_refs)
             ray.get([self.reward_model[0].empty_cache.remote()])
