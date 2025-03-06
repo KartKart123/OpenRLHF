@@ -337,7 +337,7 @@ class PPOTrainer(ABC):
         return status
 
     def training_step_actor(self, experience: Experience, epoch: int) -> Dict[str, float]:
-        print(f"[PPO Trainer] Running actor training step. Epoch: {epoch}")
+        # print(f"[PPO Trainer] Running actor training step. Epoch: {epoch}")
         self.actor.train()
 
         # TODO: this is a bad indicator to say that data is packed...
@@ -373,7 +373,7 @@ class PPOTrainer(ABC):
                 base_action_log_probs = experience.base_action_log_probs
 
         # actor loss
-        print("[PPO Trainer] Running actor forward pass")
+        # print("[PPO Trainer] Running actor forward pass")
         action_log_probs, output = self.actor(
             sequences,
             num_actions,
@@ -401,7 +401,7 @@ class PPOTrainer(ABC):
             )
 
         # loss function
-        print("[PPO Trainer] Running actor loss function")
+        # print("[PPO Trainer] Running actor loss function")
         actor_loss = self.actor_loss_fn(
             action_log_probs,
             old_action_log_probs,
@@ -440,7 +440,7 @@ class PPOTrainer(ABC):
         else:
             aux_loss = 0
         loss = actor_loss + aux_loss * self.args.aux_loss_coef + kl_loss * self.kl_ctl.value
-        print("[PPO Trainer] Running actor backward pass")
+        # print("[PPO Trainer] Running actor backward pass")
         self.strategy.backward(loss, self.actor, self.actor_optim)
 
         # ptx loss
@@ -467,7 +467,7 @@ class PPOTrainer(ABC):
             loss = ptx_loss + aux_loss * self.args.aux_loss_coef
             self.strategy.backward(self.ptx_coef * loss, self.actor, self.actor_optim)
 
-        print("[PPO Trainer] Running actor optimizer step")
+        # print("[PPO Trainer] Running actor optimizer step")
         self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
         if self.ema_model:
             self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, "cuda")

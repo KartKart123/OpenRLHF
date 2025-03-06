@@ -70,6 +70,9 @@ class LLMRayActor:
     def wake_up(self):
         self.llm.wake_up()
 
+    def generate(self, sampling_params, prompt_token_ids):
+        return self.llm.generate(sampling_params=sampling_params, prompt_token_ids=prompt_token_ids)
+
     def add_requests(self, actor_rank, *, sampling_params, prompt_token_ids):
         """
         Save the requests from actors and generate responses when all actors have sent their requests

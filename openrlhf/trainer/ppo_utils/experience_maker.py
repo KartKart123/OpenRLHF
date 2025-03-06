@@ -201,14 +201,20 @@ class NaiveExperienceMaker(ABC):
         After that, we will calculate the advantages and returns for each experience.
         """
         args = self.strategy.args
-        print(f"[Experience Maker] Running make_experience_list")
+        # print(f"[Experience Maker] Running make_experience_list")
 
         # vLLM wakeup when vllm_enable_sleep
+        rank = dist.get_rank()
         if self.strategy.args.vllm_enable_sleep:
-            from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
+            if args.colocate_all_models:
+                # No need to synchronize if each actor corresponds to a single vLLM engine
+                # print(f"[Experience Maker {rank}] waking up vLLM engine")
+                self.vllm_engines[rank].wake_up.remote()
+            else:
+                from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
 
-            batch_vllm_engine_call(self.vllm_engines, "wake_up")
-            torch.distributed.barrier()
+                batch_vllm_engine_call(self.vllm_engines, "wake_up")
+                torch.distributed.barrier()
             torch.cuda.synchronize()
 
         # generate responses
@@ -229,13 +235,17 @@ class NaiveExperienceMaker(ABC):
             samples_list = self.generate_samples(all_prompts, all_labels, **generate_kwargs)
 
         # vLLM offload when vllm_enable_sleep
-        if self.strategy.args.vllm_enable_sleep:
-            batch_vllm_engine_call(self.vllm_engines, "sleep")
-
-        torch.distributed.barrier()
+        if args.colocate_all_models:
+            # print(f"[Experience Maker {rank}] sleeping vLLM engine")
+            self.vllm_engines[rank].sleep.remote()
+        else:
+            if self.strategy.args.vllm_enable_sleep:
+                from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
+                batch_vllm_engine_call(self.vllm_engines, "sleep")
+            torch.distributed.barrier()
         torch.cuda.synchronize()
 
-        print(f"[Experience Maker] Running make_experience")
+        # print(f"[Experience Maker] Running make_experience")
         experiences = []
         for samples in tqdm(
             samples_list,
@@ -290,7 +300,7 @@ class NaiveExperienceMaker(ABC):
             experience.kl = None
             del experience.info["num_actions"]
             experience.to_device("cpu")
-        print(f"[Experience Maker] Finished making experience_list")
+        # print(f"[Experience Maker] Finished making experience_list")
         return experiences
 
     @torch.no_grad()
@@ -658,7 +668,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     offset += length
                 queries = self.tokenizer.batch_decode(sequences_list, skip_special_tokens=False)
 
-            print(f"[Experience Maker] Running custom reward function")
+            # print(f"[Experience Maker] Running custom reward function")
             if self.custom_reward_func:
                 r = self.custom_reward_func.remote(queries, samples.prompts, samples.labels)
                 r_refs.append(r)
@@ -666,7 +676,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 for rm in self.remote_rm_url:
                     r = remote_rm_fn_ray.remote(rm, queries=queries, prompts=samples.prompts, labels=samples.labels)
                     r_refs.append(r)
-        print(f"[Experience Maker] Finished running remote reward function")
+        # print(f"[Experience Maker] Finished running remote reward function")
         if args.colocate_all_models and not self.remote_rm_url:
             ray.get(r_refs)
             ray.get([self.reward_model[0].empty_cache.remote()])
@@ -805,26 +815,35 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         all_prompts = sum([[prompt] * args.n_samples_per_prompt for prompt in all_prompts], [])
         all_labels = sum([[label] * args.n_samples_per_prompt for label in all_labels], [])
         all_prompt_token_ids = self.tokenize_fn(all_prompts, self.prompt_max_len, padding=False)["input_ids"]
+        
+        if args.colocate_all_models:
+            # No need to distribute requests to engines if num_actors == num_engines
+            rank = dist.get_rank()
+            llm = self.vllm_engines[rank]
+            ref = llm.generate.remote(sampling_params=sampling_params, prompt_token_ids=all_prompt_token_ids)
+            all_outputs = ray.get(ref)
+        else:
+            # Distribute requests to engines and collect responses to outputs
+            refs = []
+            batch_size = (len(all_prompt_token_ids) + len(llms) - 1) // len(llms)
+            for i, llm in enumerate(llms):
+                prompt_token_ids = all_prompt_token_ids[i * batch_size : (i + 1) * batch_size]
+                refs.append(
+                    llm.add_requests.remote(rank, sampling_params=sampling_params, prompt_token_ids=prompt_token_ids)
+                )
+            ray.get(refs)
 
-        # Distribute requests to engines and collect responses to outputs
-        refs = []
-        batch_size = (len(all_prompt_token_ids) + len(llms) - 1) // len(llms)
-        for i, llm in enumerate(llms):
-            prompt_token_ids = all_prompt_token_ids[i * batch_size : (i + 1) * batch_size]
-            refs.append(
-                llm.add_requests.remote(rank, sampling_params=sampling_params, prompt_token_ids=prompt_token_ids)
-            )
-        ray.get(refs)
+            # Make sure all requests are sent.
+            if self.strategy.ring_attn_group is None:
+                torch.distributed.barrier()
 
-        # Make sure all requests are sent.
-        if self.strategy.ring_attn_group is None:
-            torch.distributed.barrier()
-
-        # Retrieve and combine results from all outputs
-        all_output_refs = []
-        for i, llm in enumerate(llms):
-            all_output_refs.append(llm.get_responses.remote(rank))
-        all_outputs = sum(ray.get(all_output_refs), [])
+            # Retrieve and combine results from all outputs
+            all_output_refs = []
+            for i, llm in enumerate(llms):
+                all_output_refs.append(llm.get_responses.remote(rank))
+            all_outputs = sum(ray.get(all_output_refs), [])
+        # print(f"[Experience Maker {rank}] Finished generating samples") 
+        # print(f"Example output: {all_outputs[-1]}")
 
         samples_list = []
         for i in range(0, len(all_outputs), args.micro_rollout_batch_size):
