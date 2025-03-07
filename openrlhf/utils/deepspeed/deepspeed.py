@@ -9,11 +9,11 @@ from typing import List, Tuple, Union
 import deepspeed
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from peft import PeftModel, get_peft_model_state_dict
-from torch import distributed as dist
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
@@ -123,6 +123,11 @@ class DeepspeedStrategy(ABC):
         optim_params = get_optimizer_grouped_parameters(model, kwargs["weight_decay"])
         optim = AdamOptimizer(optim_params, **kwargs)
         return optim
+
+    def get_grad_norm(self, model: nn.Module) -> float:
+        if isinstance(model, Actor):
+            model = model.model
+        return model.get_global_grad_norm()
 
     def backward(self, loss: torch.Tensor, model: nn.Module, optimizer: optim.Optimizer, **kwargs) -> None:
         if isinstance(model, Actor):

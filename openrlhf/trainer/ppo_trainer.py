@@ -262,7 +262,7 @@ class PPOTrainer(ABC):
             self._tensorboard.close()
 
     def ppo_train(self, global_steps=0):
-        print(f"[PPO Trainer] Running PPO_train")
+        # print(f"[PPO Trainer] Running PPO_train")
         torch.cuda.empty_cache()
         # replay buffer may be empty at first, we should rebuild at each training
         dataloader = DataLoader(
@@ -277,6 +277,7 @@ class PPOTrainer(ABC):
 
         status_list = []
         status_mean = {}
+        grad_norm_list = []
         for epoch in range(self.max_epochs):
             pbar = tqdm(
                 dataloader,
@@ -317,6 +318,9 @@ class PPOTrainer(ABC):
 
                 status_list.append(status)
                 pbar.set_postfix(short_status)
+            grad_norm = self.strategy.get_grad_norm(self.actor)
+            print(f"[Epoch {epoch}] Grad norm: {grad_norm}")
+            grad_norm_list.append(grad_norm)
 
         if status_list:
             status_mean = status_list[0]
@@ -325,6 +329,7 @@ class PPOTrainer(ABC):
                     status_mean[k] += v
             for k in status_mean.keys():
                 status_mean[k] /= len(status_list)
+            status_mean["grad_norm"] = sum(grad_norm_list) / len(grad_norm_list)
         torch.cuda.empty_cache()
         return status_mean
 
