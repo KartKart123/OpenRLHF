@@ -209,7 +209,8 @@ class NaiveExperienceMaker(ABC):
             if args.colocate_all_models:
                 # No need to synchronize if each actor corresponds to a single vLLM engine
                 # print(f"[Experience Maker {rank}] waking up vLLM engine")
-                self.vllm_engines[rank].wake_up.remote()
+                ref = self.vllm_engines[rank].wake_up.remote()
+                ray.get(ref)
             else:
                 from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
 
@@ -237,7 +238,8 @@ class NaiveExperienceMaker(ABC):
         # vLLM offload when vllm_enable_sleep
         if args.colocate_all_models:
             # print(f"[Experience Maker {rank}] sleeping vLLM engine")
-            self.vllm_engines[rank].sleep.remote()
+            ref = self.vllm_engines[rank].sleep.remote()
+            ray.get(ref)
         else:
             if self.strategy.args.vllm_enable_sleep:
                 from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
