@@ -823,6 +823,19 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             # No need to distribute requests to engines if num_actors == num_engines
             rank = dist.get_rank()
             llm = self.vllm_engines[rank]
+            # if args.use_tools:
+            # .   all_messages = [{"role": "user", "content": prompt} for prompt in all_prompts]
+            #     ref = llm.chat.remote(all_messages, sampling_params=sampling_params, tools=tools)
+            #     all_outputs = ray.get(ref)
+            #     ref = remote_rm_fn_ray.remote(rm, queries=queries, prompts=samples.prompts, labels=samples.labels) 
+            #     rewards = ray.get(ref)
+            #     tool_answers = reward # Placeholder for tool answers
+            #     all_messages = [message.append({
+            #           "role": "tool", 
+            #           "content": tool_answers[i]},
+            #       ) for i, message in enumerate(all_messages)]
+            #     ref = llm.chat.remote(all_messages, sampling_params=sampling_params, tools=tools)
+            #     all_outputs = ray.get(ref)
             ref = llm.generate.remote(sampling_params=sampling_params, prompt_token_ids=all_prompt_token_ids)
             all_outputs = ray.get(ref)
         else:
