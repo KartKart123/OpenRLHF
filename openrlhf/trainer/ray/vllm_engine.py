@@ -73,6 +73,9 @@ class LLMRayActor:
     def wake_up(self):
         self.llm.wake_up()
 
+    def chat(self, messages, sampling_params, tools=None):
+        return self.llm.chat(messages=messages, sampling_params=sampling_params, tools=tools)
+
     def generate(self, sampling_params, prompt_token_ids):
         return self.llm.generate(sampling_params=sampling_params, prompt_token_ids=prompt_token_ids)
 
