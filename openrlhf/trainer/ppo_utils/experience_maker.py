@@ -849,17 +849,17 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 )
             ray.get(refs)
 
-        # Make sure all requests are sent.
-        if self.strategy.ring_attn_group is None:
-            torch.distributed.barrier()
-        else:
-            time.sleep(3)
-
-            # Retrieve and combine results from all outputs
-            all_output_refs = []
-            for i, llm in enumerate(llms):
-                all_output_refs.append(llm.get_responses.remote(rank))
-            all_outputs = sum(ray.get(all_output_refs), [])
+            # Make sure all requests are sent.
+            if self.strategy.ring_attn_group is None:
+                torch.distributed.barrier()
+            else:
+                time.sleep(3)
+    
+                # Retrieve and combine results from all outputs
+                all_output_refs = []
+                for i, llm in enumerate(llms):
+                    all_output_refs.append(llm.get_responses.remote(rank))
+                all_outputs = sum(ray.get(all_output_refs), [])
         # print(f"[Experience Maker {rank}] Finished generating samples") 
         # print(f"Example output: {all_outputs[-1]}")
 
