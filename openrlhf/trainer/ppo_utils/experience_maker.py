@@ -123,6 +123,8 @@ class Samples:
     prompts: list[str]
     labels: list[str]
     pad_len: Optional[int]
+    rank: Optional[int]
+    step: Optional[int]
 
 
 class NaiveExperienceMaker(ABC):
@@ -190,8 +192,11 @@ class NaiveExperienceMaker(ABC):
         return {k: v.to(device) for k, v in batch.items()}
 
     @torch.no_grad()
+    # def make_experience_list(
+    #     self, all_prompts: Union[str, List[str]], all_labels, **generate_kwargs
+    # ) -> List[Experience]:
     def make_experience_list(
-        self, all_prompts: Union[str, List[str]], all_labels, **generate_kwargs
+        self, all_prompts: Union[str, List[str]], all_labels, step: Optional[int] = None, **generate_kwargs
     ) -> List[Experience]:
         """
         Make a list of experience with the micro_rollout_batch_size.
@@ -233,7 +238,8 @@ class NaiveExperienceMaker(ABC):
                     samples_list, src=self.strategy.ring_attn_ranks[0], group=self.strategy.ring_attn_group
                 )
         else:
-            samples_list = self.generate_samples(all_prompts, all_labels, **generate_kwargs)
+            # samples_list = self.generate_samples(all_prompts, all_labels, **generate_kwargs)
+            samples_list = self.generate_samples(all_prompts, all_labels, rank=rank, step=step, **generate_kwargs)
 
         # vLLM offload when vllm_enable_sleep
         if args.colocate_all_models:
@@ -245,6 +251,7 @@ class NaiveExperienceMaker(ABC):
                 from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
                 batch_vllm_engine_call(self.vllm_engines, "sleep")
             torch.distributed.barrier()
+        torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
         # print(f"[Experience Maker] Running make_experience")
@@ -254,7 +261,7 @@ class NaiveExperienceMaker(ABC):
             desc="make_experience",
             disable=not self.strategy.is_rank_0(),
         ):
-            experiences.append(self.make_experience(samples).to_device("cpu"))
+            experiences.append(self.make_experience(samples).to_device("cpu")) # CHANGE: pass in rank & step as metadata
 
         experiences, rewards = self.process_experiences(experiences)
 
@@ -306,7 +313,8 @@ class NaiveExperienceMaker(ABC):
         return experiences
 
     @torch.no_grad()
-    def generate_samples(self, all_prompts: List[str], all_labels, **generate_kwargs) -> List[Samples]:
+    # def generate_samples(self, all_prompts: List[str], all_labels, **generate_kwargs) -> List[Samples]:
+    def generate_samples(self, all_prompts: List[str], all_labels, rank: Optional[int] = None, step: Optional[int] = None, **generate_kwargs) -> List[Samples]:
         """
         Generate samples and return in batches.
         """
@@ -570,16 +578,21 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             self.custom_reward_func = ray.remote(self.custom_reward_func)
 
     @torch.no_grad()
+    # def make_experience_list(
+    #     self, all_prompts: Union[str, List[str]], all_labels, **generate_kwargs
+    # ) -> List[Experience]:
     def make_experience_list(
-        self, all_prompts: Union[str, List[str]], all_labels, **generate_kwargs
+        self, all_prompts: Union[str, List[str]], all_labels, step: Optional[int] = None, **generate_kwargs
     ) -> List[Experience]:
+        print(f"[Step {step}] Making experience list")
         if self.strategy.args.perf:
             self.perf_stats = {
                 "generate_time": 0,
                 "actor_value_rm_time": 0,
                 "wait_time": 0,
             }
-        experiences = super().make_experience_list(all_prompts, all_labels, **generate_kwargs)
+        # experiences = super().make_experience_list(all_prompts, all_labels, **generate_kwargs)
+        experiences = super().make_experience_list(all_prompts, all_labels, step=step, **generate_kwargs)
         if self.critic is not None:
             for experience in experiences:
                 # send experience to critic
@@ -589,7 +602,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         return experiences
 
     @torch.no_grad()
-    def generate_samples(self, all_prompts: List[str], all_labels, **generate_kwargs) -> List[Samples]:
+    # def generate_samples(self, all_prompts: List[str], all_labels, **generate_kwargs) -> List[Samples]:
+    def generate_samples(self, all_prompts: List[str], all_labels, rank: Optional[int] = None, step: Optional[int] = None, **generate_kwargs) -> List[Samples]:
         """
         Generate samples and return in batches.
 
@@ -602,9 +616,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         args = self.strategy.args
         # vLLM generation
         if args.use_tools:
-            samples = self._generate_vllm_with_tools(all_prompts, all_labels, **generate_kwargs)
+            samples = self._generate_vllm_with_tools(all_prompts, all_labels, step=step, **generate_kwargs)
         else:
-            samples = self._generate_vllm(all_prompts, all_labels, **generate_kwargs)
+            samples = self._generate_vllm(all_prompts, all_labels, step=step, **generate_kwargs)
         return samples
 
     @torch.no_grad()
@@ -622,6 +636,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         action_mask = samples.action_mask
         num_actions = samples.num_actions
         packed_seq_lens = samples.packed_seq_lens
+        rank = samples.rank
+        step = samples.step
+        metadata = {"rank": rank, "step": step}
         start = time.time()
         sequences_cpu, attention_mask_cpu = (
             sequences.to("cpu"),
@@ -664,26 +681,34 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 )
         else:
             # remote RM
-            if not self.packing_samples:
-                queries = self.tokenizer.batch_decode(sequences_cpu, skip_special_tokens=False)
-            else:
-                sequences_list = []
-                offset = 0
-                tokens_list = sequences_cpu.tolist()[0]
-                for length in packed_seq_lens:
-                    sequences_list.append(tokens_list[offset : offset + length])
-                    offset += length
-                queries = self.tokenizer.batch_decode(sequences_list, skip_special_tokens=False)
+            if self.strategy.ring_attn_group is None or self.strategy.ring_attn_rank == 0:
+                if not self.packing_samples:
+                    queries = self.tokenizer.batch_decode(sequences_cpu, skip_special_tokens=False)
+                else:
+                    sequences_list = []
+                    offset = 0
+                    tokens_list = sequences_cpu.tolist()[0]
+                    for length in packed_seq_lens:
+                        sequences_list.append(tokens_list[offset : offset + length])
+                        offset += length
+                    queries = self.tokenizer.batch_decode(sequences_list, skip_special_tokens=False)
 
-            # print(f"[Experience Maker] Running custom reward function")
-            if self.custom_reward_func:
-                r = self.custom_reward_func.remote(queries, samples.prompts, samples.labels)
-                r_refs.append(r)
-            else:
-                for rm in self.remote_rm_url:
-                    r = remote_rm_fn_ray.remote(rm, queries=queries, prompts=samples.prompts, labels=samples.labels)
+                # print(f"[Experience Maker] Running custom reward function")
+                if self.custom_reward_func:
+                    r = self.custom_reward_func.remote(queries, samples.prompts, samples.labels)
                     r_refs.append(r)
-        # print(f"[Experience Maker] Finished running remote reward function")
+                else:
+                    for rm in self.remote_rm_url:
+                        # r = remote_rm_fn_ray.remote(rm, queries=queries, prompts=samples.prompts, labels=samples.labels)
+                        print(f"[Rank {rank}] [Step {step}] Running remote reward function")
+                        r = remote_rm_fn_ray.remote(
+                            rm, queries=queries, prompts=samples.prompts, labels=samples.labels, metadata=metadata
+                        )
+                        r_refs.append(r)
+            else:
+                r_refs.append(ray.put(None))
+                
+        # print(f"[Experience Maker] Finished running remote reward function")            
         if args.colocate_all_models and not self.remote_rm_url:
             ray.get(r_refs)
             ray.get([self.reward_model[0].empty_cache.remote()])
@@ -712,6 +737,16 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             base_action_log_probs = base_action_log_probs.to(device)
         if value is not None:
             value = value.to(device)
+
+        # broadcast rewards to all ring attention ranks when using remote RM
+        if self.remote_rm_url and self.strategy.ring_attn_group is not None:
+            if self.strategy.ring_attn_rank == 0:
+                dist.broadcast_object_list(rewards, src=dist.get_rank(), group=self.strategy.ring_attn_group)
+            else:
+                dist.broadcast_object_list(
+                    rewards, src=self.strategy.ring_attn_ranks[0], group=self.strategy.ring_attn_group
+                )
+
         rewards = [r.to(device) for r in rewards]
         r = self.reward_fn(rewards) if len(rewards) > 0 else rewards[0]
 
@@ -792,7 +827,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         self.actor.train()  # reset model state
         return experience
 
-    def _generate_vllm_with_tools(self, all_prompts: List[str], all_labels, **kwargs) -> List[Samples]:
+    def _generate_vllm_with_tools(self, all_prompts: List[str], all_labels, step: Optional[int] = None, **kwargs) -> List[Samples]:
         from vllm import SamplingParams
 
         tools = [
@@ -814,6 +849,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
 
         # round-robin load balance
         rank = torch.distributed.get_rank()
+        print(f"[Rank {rank}] [Step {step}] Generating samples")
         world_size = torch.distributed.get_world_size()
 
         args = self.strategy.args
@@ -930,11 +966,12 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             )
         return samples_list
 
-    def _generate_vllm(self, all_prompts: List[str], all_labels, **kwargs) -> List[Samples]:
+    def _generate_vllm(self, all_prompts: List[str], all_labels, step: Optional[int] = None, **kwargs) -> List[Samples]:
         from vllm import SamplingParams
 
         # round-robin load balance
         rank = torch.distributed.get_rank() // self.strategy.ring_attn_size
+        print(f"[Rank {rank}] [Step {step}] Generating samples")
         world_size = torch.distributed.get_world_size() // self.strategy.ring_attn_size
 
         # Select LLM engines: assign each rank an engine, or cycle through engines if world_size < engine_count
@@ -1042,6 +1079,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         prompts=prompts,
                         labels=labels,
                         pad_len=None,
+                        rank = rank,
+                        step = step
                     )
                 )
             else:
@@ -1096,6 +1135,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         prompts=prompts,
                         labels=labels,
                         pad_len=pad_len,
+                        rank = rank,
+                        step = step
                     )
                 )
         return samples_list
