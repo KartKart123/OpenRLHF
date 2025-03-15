@@ -344,7 +344,7 @@ class PPOTrainer(ABC):
         return status
 
     def training_step_actor(self, experience: Experience, epoch: int) -> Dict[str, float]:
-        # print(f"[PPO Trainer] Running actor training step. Epoch: {epoch}")
+        print(f"[PPO Trainer] Running actor training step. Epoch: {epoch}")
         self.actor.train()
 
         # TODO: this is a bad indicator to say that data is packed...
@@ -365,6 +365,7 @@ class PPOTrainer(ABC):
                 )
             if self.args.use_kl_loss and experience.base_action_log_probs is not None:
                 base_action_log_probs = torch.cat(experience.base_action_log_probs, dim=0).unsqueeze(0)
+                # print("Base action log probs shape:", base_action_log_probs.shape)
         else:
             sequences = experience.sequences
             old_action_log_probs = experience.action_log_probs
@@ -374,6 +375,7 @@ class PPOTrainer(ABC):
             attention_mask = experience.attention_mask
             if self.args.use_kl_loss and experience.base_action_log_probs is not None:
                 base_action_log_probs = experience.base_action_log_probs
+                # print("Base action log probs shape:", base_action_log_probs.shape)
 
         # actor loss
         # print("[PPO Trainer] Running actor forward pass")

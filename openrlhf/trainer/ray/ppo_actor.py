@@ -515,6 +515,7 @@ class ActorModelRayActor(BasePPORole):
             if self.strategy.args.vllm_enable_sleep:
                 batch_vllm_engine_call(vllm_engines, "wake_up")
             torch.distributed.barrier()
+            torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
             trainer._broadcast_to_vllm()
