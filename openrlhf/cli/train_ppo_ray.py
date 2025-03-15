@@ -191,8 +191,10 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # Tool use
-    parser.add_argument("--use_tools", action="store_true", default=False, help="Use tools")
+    # Refinement
+    parser.add_argument("--refinement", action="store_true", default=False, help="Use refinement")
+    parser.add_argument("--num_passes", type=int, default=1, help="number of refinement steps for each prompt")
+
     # Ray and vLLM
     parser.add_argument("--ref_num_nodes", type=int, default=1, help="number of nodes for reference")
     parser.add_argument("--ref_num_gpus_per_node", type=int, default=8, help="number of gpus per node for reference")
@@ -370,6 +372,7 @@ if __name__ == "__main__":
     parser.add_argument("--critic_pretrain", type=str, default=None, help="HF model name or path")
     parser.add_argument("--value_head_prefix", type=str, default="score")
     parser.add_argument("--ref_reward_offload", action="store_true", default=False)
+    parser.add_argument("--chat_template", type=str, default=None, help="Chat template file path")
 
     # Custom dataset
     parser.add_argument("--prompt_data", type=str, default=None, help="HF dataset name or path")

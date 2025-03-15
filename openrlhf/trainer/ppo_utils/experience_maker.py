@@ -585,11 +585,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         """
         if self.vllm_engines is None:
             return super().generate_samples(all_prompts, all_labels, **generate_kwargs)
-        num_passes = 2
         args = self.strategy.args
         # vLLM generation
-        if args.use_tools:
-            samples = self._generate_vllm_with_tools(all_prompts, all_labels, step=step, **generate_kwargs)
+        if args.refinement:
+            samples = self._generate_vllm_refinement(all_prompts, all_labels, step=step, **generate_kwargs)
         else:
             samples = self._generate_vllm(all_prompts, all_labels, step=step, **generate_kwargs)
         return samples
@@ -760,29 +759,16 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
 
         self.actor.train()  # reset model state
         return experience
+    
+    def _get_chat_template(self):
+        with open(self.strategy.args.chat_template, 'r') as f:
+            return f.read()
 
-    def _generate_vllm_with_tools(self, all_prompts: List[str], all_labels, step: Optional[int] = None, **kwargs) -> List[Samples]:
+    def _generate_vllm_refinement(self, all_prompts: List[str], all_labels, step: Optional[int] = None, **kwargs) -> List[Samples]:
         from vllm import SamplingParams
 
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "test",
-                    "description": "Test for correctness and performance.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "code": {"type": "string"}
-                        },
-                        "required": ["code"]
-                    }
-                }
-            }
-        ]
-
         # round-robin load balance
-        rank = torch.distributed.get_rank()
+        rank = torch.distributed.get_rank() // self.strategy.ring_attn_size
         print(f"[Rank {rank}] [Step {step}] Generating samples")
         world_size = torch.distributed.get_world_size()
 
@@ -798,52 +784,62 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             include_stop_str_in_output=True,
         )
 
+        self.tokenizer.chat_template = self._get_chat_template()
         # Expand prompt list based on the number of samples per prompt
-        all_prompts = sum([[prompt] * args.n_samples_per_prompt for prompt in all_prompts], [])
-        all_labels = sum([[label] * args.n_samples_per_prompt for label in all_labels], [])
-        all_messages = [{"role": "user", "content": prompt} for prompt in all_prompts]
+        all_prompts = sum([[prompt] * args.n_samples_per_prompt//args.num_passes for prompt in all_prompts], [])
+        all_labels = sum([[label] * args.n_samples_per_prompt//args.num_passes for label in all_labels], [])
+        all_messages = [[self.tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)] for prompt in all_prompts]
+        all_outputs = [["" for _ in range(args.num_passes)] for _ in range(len(all_prompts))]
+        
         
         # No need to distribute requests to engines if num_actors == num_engines
-        rank = dist.get_rank()
         llm = self.vllm_engines[rank]
 
-        # TODO: keep generating until max token limit is reached
-        num_passes = 3
-        rewards = torch.full((len(all_prompts), num_passes), float('-inf'))
-        lengths = torch.zeros(len(all_prompts))
+        # keep generating until max token limit is reached
+        rewards = [[0 for _ in range(args.num_passes)] for _ in range(len(all_prompts))]
         mask = [True] * len(all_prompts)
-        for i in range(num_passes):
+        for i in range(args.num_passes):
+            # Compute mask for active prompts
             indices = [j for j in range(len(all_messages)) if mask[j]]
+            print("Mask: ", indices)
             if len(indices) == 0:
                 break
-            current_messages = [all_messages[j] for j in indices]
-            current_prompts = [all_prompts[j] for j in indices]
+            current_messages = [all_messages[j][-1]+"<think>\n" for j in indices]
+            print("--------------current_messages------------------")
+            print('\n'.join(current_messages))
+            print("--------------current_messages------------------")
             current_labels = [all_labels[j] for j in indices]
-            ref = llm.chat.remote(current_messages, sampling_params=sampling_params, tools=tools)
+            ref = llm.generate.remote(current_messages, sampling_params=sampling_params)
             current_outputs = ray.get(ref)
-            if i == 0:
-                for j, output in enumerate(current_outputs):
-                    lengths[indices[j]] = len(output.prompt_token_ids)
-            current_lengths = [len(output.outputs[0].token_ids) for output in current_outputs]
-            current_outputs = [output.outputs[0].text.strip() for output in current_outputs]
-            # TODO:PARSING TOOL ANSWERS
+            current_lengths = [len(output.prompt_token_ids) for output in current_outputs]
+            current_texts = [output.outputs[0].text.strip() for output in current_outputs]
+            print("--------------current_texts------------------")
+            print('\n'.join(current_texts))
+            print("--------------current_texts------------------")
             
             # send to RM
             # TODO: add multiple RM support
-            ref = remote_rm_fn_ray.remote(self.remote_rm_url[0], queries=current_outputs, prompts=current_prompts, labels=current_labels) 
-            rewards, tool_answers = ray.get(ref)
-            current_messages = [message.append({ # TODO: placeholder for tool answers
-                "role": "tool", 
-                "name": "test",
-                "content": tool_answers[j]},
-            ) for j, message in enumerate(current_messages)]
-            for j, k in enumerate(indices):
-                lengths[k] += current_lengths[j]
-                if lengths[k] > llm.max_model_len - 2048:
-                    mask[k] = False
-                all_messages[k] = current_messages[j]
-                rewards[k, i] = rewards[j]
-                # all_outputs[k] += current_outputs[j]
+            ref = remote_rm_fn_ray.remote(self.remote_rm_url[0], queries=current_texts, prompts=current_messages, labels=current_labels)
+            rewards, infos = ray.get(ref)
+            next_messages = [message + (output.split("</think>")[-1].lstrip('\n') if "</think>" in output else self.tokenizer.eos_token) +
+                            self.tokenizer.apply_chat_template([{"role": "user", "content": info}], tokenize=False, add_generation_prompt=True) 
+                            for message, output, info in zip(current_messages, current_texts, infos)]
+            print("--------------next_messages------------------")
+            print('\n'.join(next_messages))
+            print("--------------next_messages------------------")
+
+            # Use mask to store outputs and rewards into active prompts
+            for j, mask_idx in enumerate(indices):
+                if current_lengths[j] > llm.max_model_len - 1024:
+                    mask[mask_idx] = False
+                all_messages[mask_idx].append(next_messages[j])
+                rewards[mask_idx][i] = rewards[j]
+                all_outputs[mask_idx][i] = current_outputs[j]
+
+        all_messages = sum([message + [""] * (args.num_passes-len(message)) for message in all_messages], [])
+        all_labels = sum([label + [""] * (args.num_passes-len(label)) for label in all_labels], [])
+        all_outputs = sum(all_outputs, [])
+        all_rewards = sum(all_rewards, [])
 
         print(f"[Experience Maker {rank}] Finished generating samples") 
         print(all_messages)
@@ -852,52 +848,64 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         samples_list = []
         for i in range(0, len(all_outputs), args.micro_rollout_batch_size):
             outputs = all_outputs[i : i + self.strategy.args.micro_rollout_batch_size]
-            prompts = all_prompts[i : i + self.strategy.args.micro_rollout_batch_size]
+            prompts = all_messages[i : i + self.strategy.args.micro_rollout_batch_size]
             labels = all_labels[i : i + self.strategy.args.micro_rollout_batch_size]
+
+            # Extract relevant rewards for this batch
+            batch_rewards = None
+            if all_rewards is not None:
+                batch_rewards = [reward[i:i + self.strategy.args.micro_rollout_batch_size] for reward in all_rewards]
             
-            # NOTE: concat all outputs to following format:
-            #
-            # | token token token | token token [EOS] | token token token token token | token token [EOS] | token token | token token token [EOS] |
-            # |<---  prompt ----->|<---- answer ----->|<---------- prompt ----------->|<----- answer ---->|<- prompt -->|<-------- answer ------->|
-            pad_token_id, eos_token_id = self.tokenizer.pad_token_id, self.tokenizer.eos_token_id
-            sequences = []
-            packed_seq_lens = []
-            attention_mask = []
-            num_actions = []
+            if not self.packing_samples:
+                # NOTE: concat all outputs to following format:
+                #
+                # | [PAD] [PAD] token token token | token token [EOS] [PAD] |
+                # | token token token token token | token token [EOS] [PAD] |
+                # | [PAD] [PAD] [PAD] token token | token token token [EOS] |
+                # |<---------- prompt ----------->|<-------- answer ------->|
+                max_input_len, max_output_len = 0, 0
+                for output in outputs:
+                    max_input_len = max(max_input_len, len(output.prompt_token_ids))
+                    max_output_len = max(max_output_len, len(output.outputs[0].token_ids))
 
-            for i, output in enumerate(outputs):
-                input_len = len(output.prompt_token_ids)
-                output_len = len(output.outputs[0].token_ids)
-                packed_seq_lens.append(input_len + output_len)
-                sequences.extend(output.prompt_token_ids + list(output.outputs[0].token_ids))
-                attention_mask.extend([i + 1] * (input_len + output_len))
-                # print(f"[Experience Maker] logprobs: {output.outputs[0].logprobs[-5:]}")
-                # current_action_mask = [0] * (input_len - 1) + [1] * output_len + [0]
-                # num_actions.append(max(1, sum(current_action_mask)))
-                num_actions.append(max(1, output_len))
+                pad_token_id, eos_token_id = self.tokenizer.pad_token_id, self.tokenizer.eos_token_id
+                sequences = []
+                for output in outputs:
+                    # left padding input
+                    input_len = len(output.prompt_token_ids)
+                    input_ids = [pad_token_id] * (max_input_len - input_len) + list(output.prompt_token_ids)
 
-            # pad seq makes the sequence a multiple of ring_attention_size.
-            pad_len = None
+                    # right padding output
+                    output_len = len(output.outputs[0].token_ids)
+                    output_ids = list(output.outputs[0].token_ids) + [pad_token_id] * (max_output_len - output_len)
 
-            sequences = torch.tensor(sequences, device="cuda").unsqueeze(0)
-            attention_mask = torch.tensor(attention_mask, device="cuda").unsqueeze(0)
-            action_mask = None
-            response_length = torch.tensor(num_actions, device="cuda", dtype=torch.float)
-            total_length = torch.tensor(packed_seq_lens, device="cuda", dtype=torch.float)
-            samples_list.append(
-                Samples(
-                    sequences=sequences,
-                    attention_mask=attention_mask,
-                    action_mask=None,
-                    num_actions=num_actions,
-                    packed_seq_lens=packed_seq_lens,
-                    response_length=response_length,
-                    total_length=total_length,
-                    prompts=prompts,
-                    labels=labels,
-                    pad_len=pad_len,
+                    # concat input and output
+                    sequences.append(input_ids + output_ids)
+
+                sequences = torch.tensor(sequences)
+                sequences, attention_mask, action_mask = self.actor.process_sequences(
+                    sequences, max_input_len, eos_token_id, pad_token_id
                 )
-            )
+                sequences = sequences.to("cuda")
+                attention_mask = attention_mask.to("cuda")
+                action_mask = action_mask.to("cuda")
+                samples_list.append(
+                    Samples(
+                        sequences=sequences,
+                        attention_mask=attention_mask,
+                        action_mask=action_mask,
+                        num_actions=action_mask.size(1),
+                        packed_seq_lens=None,
+                        response_length=action_mask.float().sum(dim=-1),
+                        total_length=attention_mask.float().sum(dim=-1),
+                        prompts=prompts,
+                        labels=labels,
+                        pad_len=None,
+                        rank=rank,
+                        step=step,
+                        rewards=batch_rewards
+                    )
+                )
         return samples_list
 
     def _generate_vllm(self, all_prompts: List[str], all_labels, step: Optional[int] = None, **kwargs) -> List[Samples]:
