@@ -28,7 +28,7 @@ def request_api_wrapper(url, data, score_key="rewards", try_max_times=1):
     return None
     raise Exception(f"Request error for {try_max_times} times, returning None. Please check the API server.")
 
-def request_api_wrapper_refinement(url, data, score_key="rewards", tool_key = "tool_answers", try_max_times=5):
+def request_api_wrapper_refinement(url, data, score_key="rewards", tool_key = "tool_answers", try_max_times=1):
     """Synchronous request API wrapper with tool-use support"""
     headers = {
         "Content-Type": "application/json",
@@ -47,6 +47,7 @@ def request_api_wrapper_refinement(url, data, score_key="rewards", tool_key = "t
             logger.info(f"Unexpected error, please check: {e}")
         time.sleep(1)
 
+    return None, None
     raise Exception(f"Request error for {try_max_times} times, returning None. Please check the API server.")
 
 def remote_rm_fn(api_url, queries, prompts, labels, metadata = None, score_key="rewards"):
@@ -57,14 +58,16 @@ def remote_rm_fn(api_url, queries, prompts, labels, metadata = None, score_key="
     score_key: RM score key
     """
     # scores = request_api_wrapper(api_url, {"query": queries, "prompts": prompts, "labels": labels}, score_key)
-    scores, tool= request_api_wrapper(api_url, {"query": queries, "prompts": prompts, "labels": labels, "metadata": metadata}, score_key)
+    scores, _ = request_api_wrapper(api_url, {"query": queries, "prompts": prompts, "labels": labels, "metadata": metadata}, score_key)
     if scores is None:
         return torch.zeros(len(queries))
     return torch.tensor(scores)
 
 def remote_rm_fn_refinement(api_url, queries, prompts, labels, metadata = None, score_key="rewards", tool_key="tool_answers"):
     scores, tool_answers = request_api_wrapper_refinement(api_url, {"query": queries, "prompts": prompts, "labels": labels, "metadata": metadata}, score_key, tool_key)
-    return scores, tool_answers
+    if scores is None or tool_answers is None:
+        return torch.zeros(len(queries)), [""] * len(queries)
+    return torch.tensor(scores), tool_answers
 
 @ray.remote
 def remote_rm_fn_ray(api_url, queries, prompts, labels, metadata = None, score_key="rewards"):
