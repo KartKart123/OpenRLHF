@@ -36,7 +36,7 @@ def _fetch_version():
 
 
 def _fetch_package_name():
-    return "openrlhf-nightly" if _is_nightly() else "openrlhf"
+    return "openrlhf-nightly" if _is_nightly() else "openrlhf-refinement"
 
 
 # Custom wheel class to modify the wheel name
