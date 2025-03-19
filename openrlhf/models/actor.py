@@ -225,6 +225,9 @@ class Actor(nn.Module):
         if ref_model:
             print(f"[Ref Actor] Running forward pass")
         output = self.model(sequences, attention_mask=attention_mask, position_ids=position_ids)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.distributed.barrier()
         # https://github.com/OpenRLHF/OpenRLHF/pull/634
         if ref_model:
             print(f"[Ref Actor] Finished forward pass. Now converting logits to float32")
@@ -272,7 +275,7 @@ class Actor(nn.Module):
                 offset += seq_len
             action_log_probs = torch.cat(action_log_probs, dim=1)
 
-        print(f"[Actor] Now returning action log probs")
+        # print(f"[Actor] Now returning action log probs")
         if return_output:
             return (action_log_probs, output)
         else:

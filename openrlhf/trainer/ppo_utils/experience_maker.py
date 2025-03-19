@@ -320,88 +320,7 @@ class NaiveExperienceMaker(ABC):
 
     @torch.no_grad()
     def make_experience(self, samples: Samples) -> Experience:
-        """
-        Turn samples into experience by calculating logprobs, values, rewards, and kl divergence.
-        """
-        self.actor.eval()
-        if self.initial_model is not None:
-            self.initial_model.eval()
-        if self.reward_model is not None:
-            self.reward_model.eval()
-        if self.critic is not None:
-            self.critic.eval()
-
-        # extract values from samples
-        sequences = samples.sequences
-        attention_mask = samples.attention_mask
-        action_mask = samples.action_mask
-        num_actions = samples.num_actions
-
-        # log probs
-        action_log_probs = self.actor(sequences, num_actions, attention_mask)
-
-        # init log probs
-        if self.initial_model is not None:
-            base_action_log_probs = self.initial_model(sequences, num_actions, attention_mask)
-        else:
-            base_action_log_probs = None
-
-        # values
-        if self.critic is not None:
-            value = self.critic(sequences, num_actions, attention_mask)
-        else:
-            value = None
-
-        # rewards
-        if self.remote_rm_url is not None:
-            # remote RM
-            queries = self.tokenizer.batch_decode(sequences.cpu(), skip_special_tokens=False)
-            if self.custom_reward_func:
-                r = self.custom_reward_func(queries, samples.prompts, samples.labels).to(
-                    device=action_log_probs.device
-                )
-            else:
-                r = remote_rm_fn(
-                    self.remote_rm_url, queries=queries, prompts=samples.prompts, labels=samples.labels
-                ).to(device=action_log_probs.device)
-        else:
-            # local RM
-            r = self.reward_model(sequences, attention_mask)
-
-        if (self.initial_model is not None) and (not self.strategy.args.use_kl_loss):
-            kl = compute_approx_kl(
-                action_log_probs,
-                base_action_log_probs,
-                action_mask=action_mask,
-                kl_estimator=self.strategy.args.kl_estimator,
-            )
-        else:
-            kl = torch.zeros_like(action_log_probs, dtype=action_log_probs.dtype, device=action_log_probs.device)
-
-        info = {
-            "kl": masked_mean(kl, action_mask, dim=-1),
-            "reward": r,
-            "response_length": samples.response_length,
-            "total_length": samples.total_length,
-            "num_actions": num_actions,
-        }
-        # reset model state
-        self.actor.train()
-        if self.critic is not None:
-            self.critic.train()
-
-        return Experience(
-            sequences,
-            action_log_probs,
-            base_action_log_probs,
-            value,
-            None,
-            None,
-            attention_mask,
-            action_mask,
-            info,
-            kl,
-        )
+        raise NotImplementedError("This method should be implemented by the subclass.")
 
     @torch.no_grad()
     def process_experiences(self, experiences: List[Experience]) -> Tuple[List[Experience], List[torch.Tensor]]:
@@ -691,6 +610,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             ray.get([self.reward_model[0].empty_cache.remote()])
 
         if args.colocate_actor_ref or args.colocate_all_models:
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
         if (self.initial_model is not None) and (not args.use_kl_loss):
