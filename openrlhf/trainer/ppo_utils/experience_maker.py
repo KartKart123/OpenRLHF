@@ -567,7 +567,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # rewards handling - use pre-calculated rewards from _generate_vllm
         if samples.rewards is not None:
             rewards = samples.rewards
-            print(f"[Rank {rank}] [Step {step}] Using pre-calculated rewards: {rewards}")
+            # print(f"[Rank {rank}] [Step {step}] Using pre-calculated rewards: {rewards}")
         else:
             if not self.remote_rm_url:
                 r_refs = []
@@ -690,18 +690,13 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
     def _generate_vllm_refinement(self, all_prompts: List[str], all_labels, step: Optional[int] = None, **kwargs) -> List[Samples]:
         from vllm import SamplingParams
 
+        overall_start_time = time.time()
         # round-robin load balance
         rank = torch.distributed.get_rank() // self.strategy.ring_attn_size
         world_size = torch.distributed.get_world_size()
 
         # No need to distribute requests to engines if num_actors == num_engines
         llm = self.vllm_engines[rank]
-
-        # No need to synchronize if each actor corresponds to a single vLLM engine
-        # print(f"[Experience Maker {rank}] waking up vLLM engine")
-        ref = llm.wake_up.remote()
-        ray.get(ref)
-        torch.cuda.synchronize()
 
         args = self.strategy.args
 
@@ -727,6 +722,15 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         mask = [True] * len(all_prompts)
         for i in range(args.num_passes):
             print(f"[Rank {rank}] [Step {step}] [Refinement Step {i+1}] Generating samples")
+
+            self.strategy.print(f"[Experience Maker {rank}] waking up vLLM engine")
+            vllm_wakeup_start_time = time.time()
+            ref = llm.wake_up.remote()
+            ray.get(ref)
+            torch.cuda.synchronize()
+            vllm_wakeup_end_time = time.time()
+            self.strategy.print(f"[Experience Maker {rank}] vLLM engine woke up in {vllm_wakeup_end_time - vllm_wakeup_start_time:.2f} seconds")
+
             # Compute mask for active prompts
             indices = [j for j in range(len(all_messages)) if mask[j]]
             if len(indices) == 0:
@@ -747,56 +751,69 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             # self.strategy.print("--------------current_texts------------------")
             # self.strategy.print('\n'.join(current_texts))
             # self.strategy.print("--------------current_texts------------------")
+
+            # vLLM offload when vllm_enable_sleep
+            self.strategy.print(f"[Experience Maker {rank}] sleeping vLLM engine")
+            vllm_sleep_start_time = time.time()
+            ref = llm.sleep.remote()
+            ray.get(ref)
+            torch.cuda.synchronize()
+            vllm_sleep_end_time = time.time()
+            self.strategy.print(f"[Experience Maker {rank}] vLLM engine slept in {vllm_sleep_end_time - vllm_sleep_start_time:.2f} seconds")
             
             # send to RM
             # TODO: add multiple RM support
             metadata = {"rank": rank, "step": step, "refinement_step": i + 1, "sample_indices": indices}
             ref = remote_rm_fn_ray_refinement.remote(self.remote_rm_url[0], queries=current_texts, prompts=current_messages, labels=current_labels, metadata=metadata)
             rewards, infos = ray.get(ref)
-            # next_messages = [message.removesuffix("<think>\n") + (output.split("</think>")[-1].lstrip('\n') if "</think>" in output else self.tokenizer.eos_token) +
-            #                 self.tokenizer.apply_chat_template([{"role": "user", "content": info}], tokenize=False, add_generation_prompt=True) 
-            #                 for message, output, info in zip(current_messages, current_texts, infos)]
-            next_messages = [self.tokenizer.apply_chat_template([{"role": "user", "content": all_prompts[index]+ "\n" + 
-                                                                  ("Here's your previous attempt:\n" + output.split("</think>")[-1].lstrip('\n') if "</think>" in output else "") + 
-                                                                  f"\nResult: {info}\n"}], tokenize=False, add_generation_prompt=True)
-                            for (index, output, info) in zip(indices, current_texts, infos)]
-            # def strip_think(text):
-            #     return text.split("</think>")[-1].lstrip('\n') if "</think>" in text else self.tokenizer.eos_token
-            # next_messages = [all_prompts[j] + strip_think(all_outputs[j][best_outputs[j]]) + strip_think(output) + self.tokenizer.apply_chat_template([{"role": "user", "content": info}], tokenize=False, add_generation_prompt=True) 
-            #                 for message, output, info in zip(current_messages, current_texts, infos)]
+            if i == 0:
+                prefix_indices = [all_prompts[j].find("Here's an example") for j in indices]
+                message_prefixes = [self.tokenizer.apply_chat_template([{"role": "user", "content": (all_prompts[j][:prefix_indices[j]] if prefix_indices[j] != -1 else all_prompts[j]) + "Here are your previous attempts:\n"}], tokenize=False, add_generation_prompt=True) for j in indices]
+            else:
+                message_prefixes = [message.removesuffix("<think>\n") for message in current_messages]
+            next_messages = [message_prefix + (output.split("</think>")[-1].lstrip('\n') if "</think>" in output and self.tokenizer.eos_token in output else self.tokenizer.eos_token) +
+                            self.tokenizer.apply_chat_template([{"role": "user", "content": info}], tokenize=False, add_generation_prompt=True) 
+                            for message_prefix, output, info in zip(message_prefixes, current_texts, infos)]    
+            # next_messages = [self.tokenizer.apply_chat_template([{"role": "user", "content": all_prompts[index]+ "\n" + 
+            #                                                       ("Here's your previous attempt:\n" + output.split("</think>")[-1].lstrip('\n') if "</think>" in output else "") + 
+            #                                                       f"\nResult: {info}\n"}], tokenize=False, add_generation_prompt=True)
+            #                 for (index, output, info) in zip(indices, current_texts, infos)]
             # self.strategy.print("--------------infos------------------")
             # self.strategy.print('\n'.join(infos))
             # self.strategy.print("--------------infos------------------")
             # self.strategy.print("--------------self.tokenizer.apply_chat_template on infos[0]------------------")
             # self.strategy.print(self.tokenizer.apply_chat_template([{"role": "user", "content": infos[0]}], tokenize=False, add_generation_prompt=True))
             # self.strategy.print("--------------self.tokenizer.apply_chat_template on infos[0]------------------")
+            # self.strategy.print("--------------message_prefixes------------------")
+            # self.strategy.print('\n'.join(message_prefixes))
+            # self.strategy.print("--------------message_prefixes------------------")
             # self.strategy.print("--------------next_messages------------------")
             # self.strategy.print('\n'.join(next_messages))
             # self.strategy.print("--------------next_messages------------------")
 
             # Use mask to store outputs and rewards into active prompts
             for j, mask_idx in enumerate(indices):
-                # if current_lengths[j] > 8192 - 1024:
-                #     mask[mask_idx] = False # TODO: need to change how we reshape all_rewards if masking
+                if current_lengths[j] > 24576 - 1024:
+                    print(f"[Rank {rank}] [Step {step}] [Refinement Step {i+1}] Prompt #{mask_idx} is too long, skipping")
+                    mask[mask_idx] = False # TODO: need to change how we reshape all_rewards if masking
                 if i < args.num_passes - 1:
                     all_messages[mask_idx].append(next_messages[j])
                 all_rewards[mask_idx][i] = rewards[j]
                 all_outputs[mask_idx][i] = current_outputs[j]
             # input()
 
-        # vLLM offload when vllm_enable_sleep
-        print(f"[Experience Maker {rank}] sleeping vLLM engine")
-        ref = llm.sleep.remote()
-        ray.get(ref)
-        torch.cuda.synchronize()
         self.strategy.print(f"[Experience Maker {rank}] Finished generating samples")
 
-        print(f"[Experience Maker {rank}] All rewards before applying gamma: {all_rewards}")
+        overall_end_time = time.time()
+        overall_duration = overall_end_time - overall_start_time
+        print(f"[Rank {rank}] [Step {step}] Total refinement process completed in {overall_duration:.2f} seconds")
+
+        # print(f"[Experience Maker {rank}] All rewards before applying gamma: {all_rewards}")
 
         # apply gamma to all_rewards
         for i in reversed(range(args.num_passes - 1)):
             all_rewards[:, i] += args.refinement_gamma * all_rewards[:, i + 1] 
-        print(f"[Experience Maker {rank}] All rewards after applying gamma: {all_rewards}")
+        # print(f"[Experience Maker {rank}] All rewards after applying gamma: {all_rewards}")
 
         all_messages = sum([message + [""] * (args.num_passes-len(message)) for message in all_messages], [])
         all_labels = sum([[label] * args.num_passes for label in all_labels], [])
