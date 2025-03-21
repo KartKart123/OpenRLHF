@@ -489,6 +489,7 @@ class ActorModelRayActor(BasePPORole):
             prompt_max_len=args.prompt_max_len,
             value_clip=args.value_clip,
             eps_clip=args.eps_clip,
+            eps_clip_high=args.eps_clip_high,
             gamma=args.gamma,
             lambd=args.lambd,
             init_kl_coef=args.init_kl_coef,

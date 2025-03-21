@@ -41,6 +41,7 @@ class PPOTrainer(ABC):
         buffer_limit (int, defaults to 0): Maximum size of the replay buffer.
         buffer_cpu_offload (bool, defaults to True): If True, offloads replay buffer to CPU.
         eps_clip (float, defaults to 0.2): Clipping coefficient for policy loss.
+        eps_clip_high (float, defaults to 0.2): Upper bound clipping coefficient for policy loss.
         value_clip (float, defaults to 0.2): Clipping coefficient for value function loss.
         micro_rollout_batch_size (int, defaults to 8): Micro-batch size for generating rollouts.
         gradient_checkpointing (bool, defaults to False): If True, enables gradient checkpointing.
@@ -77,6 +78,7 @@ class PPOTrainer(ABC):
         buffer_limit: int = 0,
         buffer_cpu_offload: bool = True,
         eps_clip: float = 0.2,
+        eps_clip_high: float = 0.2,
         value_clip: float = 0.2,
         micro_rollout_batch_size: int = 8,
         gradient_checkpointing: bool = False,
@@ -125,7 +127,7 @@ class PPOTrainer(ABC):
         self.actor_scheduler = actor_scheduler
         self.critic_scheduler = critic_scheduler
 
-        self.actor_loss_fn = PolicyLoss(eps_clip)
+        self.actor_loss_fn = PolicyLoss(eps_clip, eps_clip_high)
         self.critic_loss_fn = ValueLoss(value_clip)
         self.ptx_loss_fn = GPTLMLoss()
 
@@ -344,7 +346,7 @@ class PPOTrainer(ABC):
         return status
 
     def training_step_actor(self, experience: Experience, epoch: int) -> Dict[str, float]:
-        print(f"[PPO Trainer] Running actor training step. Epoch: {epoch}")
+        # print(f"[PPO Trainer] Running actor training step. Epoch: {epoch}")
         self.actor.train()
 
         # TODO: this is a bad indicator to say that data is packed...
