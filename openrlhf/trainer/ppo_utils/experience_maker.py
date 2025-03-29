@@ -9,7 +9,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from tqdm import tqdm
-from time import sleep
 
 from openrlhf.models.actor import Actor
 from openrlhf.models.ring_attn_utils import pad_sequences, unpad_sequences
@@ -194,9 +193,6 @@ class NaiveExperienceMaker(ABC):
         return {k: v.to(device) for k, v in batch.items()}
 
     @torch.no_grad()
-    # def make_experience_list(
-    #     self, all_prompts: Union[str, List[str]], all_labels, **generate_kwargs
-    # ) -> List[Experience]:
     def make_experience_list(
         self, all_prompts: Union[str, List[str]], all_labels, step: Optional[int] = None, **generate_kwargs
     ) -> List[Experience]:
@@ -208,7 +204,6 @@ class NaiveExperienceMaker(ABC):
         After that, we will calculate the advantages and returns for each experience.
         """
         args = self.strategy.args
-        # print(f"[Experience Maker] Running make_experience_list")
 
         # generate responses
         if self.strategy.ring_attn_group is not None:
@@ -225,10 +220,8 @@ class NaiveExperienceMaker(ABC):
                     samples_list, src=self.strategy.ring_attn_ranks[0], group=self.strategy.ring_attn_group
                 )
         else:
-            # samples_list = self.generate_samples(all_prompts, all_labels, **generate_kwargs)
             samples_list = self.generate_samples(all_prompts, all_labels, step=step, **generate_kwargs)
 
-        print(f"[Experience Maker] Running make_experience")
         experiences = []
         for samples in tqdm(
             samples_list,
@@ -283,11 +276,9 @@ class NaiveExperienceMaker(ABC):
             experience.kl = None
             del experience.info["num_actions"]
             experience.to_device("cpu")
-        # print(f"[Experience Maker] Finished making experience_list")
         return experiences
 
     @torch.no_grad()
-    # def generate_samples(self, all_prompts: List[str], all_labels, **generate_kwargs) -> List[Samples]:
     def generate_samples(self, all_prompts: List[str], all_labels, step: Optional[int] = None, **generate_kwargs) -> List[Samples]:
         """
         Generate samples and return in batches.
@@ -473,9 +464,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             self.custom_reward_func = ray.remote(self.custom_reward_func)
 
     @torch.no_grad()
-    # def make_experience_list(
-    #     self, all_prompts: Union[str, List[str]], all_labels, **generate_kwargs
-    # ) -> List[Experience]:
     def make_experience_list(
         self, all_prompts: Union[str, List[str]], all_labels, step: Optional[int] = None, **generate_kwargs
     ) -> List[Experience]:
@@ -486,7 +474,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 "actor_value_rm_time": 0,
                 "wait_time": 0,
             }
-        # experiences = super().make_experience_list(all_prompts, all_labels, **generate_kwargs)
         experiences = super().make_experience_list(all_prompts, all_labels, step=step, **generate_kwargs)
         if self.critic is not None:
             for experience in experiences:
@@ -497,7 +484,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         return experiences
 
     @torch.no_grad()
-    # def generate_samples(self, all_prompts: List[str], all_labels, **generate_kwargs) -> List[Samples]:
     def generate_samples(self, all_prompts: List[str], all_labels, step: Optional[int] = None, **generate_kwargs) -> List[Samples]:
         """
         Generate samples and return in batches.
@@ -542,7 +528,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # init log probs
         if self.initial_model is not None:
             torch.distributed.barrier()
-            print(f"[Rank {rank}] [Step {step}] Running initial model")
             base_action_log_probs_ref = self.initial_model.forward.remote(
                 sequences_cpu, num_actions, attention_mask_cpu, logps_allgather=True, packed_seq_lens=packed_seq_lens, ref_model=True
             )
@@ -551,7 +536,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 ray.get([base_action_log_probs_ref])
                 ray.get([self.initial_model.empty_cache.remote()])
                 torch.distributed.barrier()
-            print(f"[Rank {rank}] [Step {step}] Finished running initial model")
         else:
             base_action_log_probs_ref = ray.put(None)
         
@@ -570,7 +554,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # rewards handling - use pre-calculated rewards from _generate_vllm
         if samples.rewards is not None:
             rewards = samples.rewards
-            # print(f"[Rank {rank}] [Step {step}] Using pre-calculated rewards: {rewards}")
         else:
             if not self.remote_rm_url:
                 r_refs = []
@@ -693,14 +676,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
     def _generate_vllm_refinement(self, all_prompts: List[str], all_labels, step: Optional[int] = None, **kwargs) -> List[Samples]:
         from vllm import SamplingParams
 
-        overall_start_time = time.time()
-        # round-robin load balance
         rank = torch.distributed.get_rank() // self.strategy.ring_attn_size
-        world_size = torch.distributed.get_world_size()
-
-        # No need to distribute requests to engines if num_actors == num_engines
         llm = self.vllm_engines[rank]
-
         args = self.strategy.args
 
         sampling_params = SamplingParams(
@@ -785,8 +762,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 for k in range(i, -1, -1):
                     new_prompt_length += all_feedbacks_lengths[j][k]
                     if new_prompt_length + all_prompts_lengths[j] >= self.prompt_max_len - 32: # Buffer since len(tokenize(A)) + len(tokenize(B)) might not equal len(tokenize(A + B)).
-                        if step < 3:
-                            print(f"[Rank {rank}] [Step {step}] [Refinement Step {i+1}] Prompt length exceeded max length at refinement step {k} for sample {j}: {new_prompt_length + all_prompts_lengths[j]}")
                         break
                     new_prompt = all_feedbacks[j][k] + new_prompt
                 new_prompt = all_prompts[j] + new_prompt + "<think>\n"
@@ -794,10 +769,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     all_messages[j].append(new_prompt)
                 all_rewards[j][i] = rewards[j]
                 all_outputs[j][i] = current_outputs[j]
-
-        overall_end_time = time.time()
-        overall_duration = overall_end_time - overall_start_time
-        print(f"[Rank {rank}] [Step {step}] Total refinement process completed in {overall_duration:.2f} seconds")
 
         # apply gamma to all_rewards
         for i in reversed(range(args.num_passes - 1)):
@@ -849,27 +820,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 sequences, attention_mask, action_mask = self.actor.process_sequences(
                     sequences, max_input_len, eos_token_id, pad_token_id
                 )
-                # self.strategy.print("-----------------------SEQUENCES-----------------------")
-                # self.strategy.print(sequences)
-                # self.strategy.print("-----------------------SEQUENCES-----------------------")
-                # self.strategy.print("-----------------------attention_mask-----------------------")
-                # self.strategy.print(attention_mask)
-                # self.strategy.print("-----------------------attention_mask-----------------------")
-                # self.strategy.print("-----------------------action_mask-----------------------")
-                # self.strategy.print(action_mask)
-                # self.strategy.print("-----------------------action_mask-----------------------")
-                # self.strategy.print("-----------------------num_actions-----------------------")
-                # self.strategy.print(action_mask.size(1))
-                # self.strategy.print("-----------------------num_actions-----------------------")
-                # self.strategy.print("-----------------------response_length-----------------------")
-                # self.strategy.print(action_mask.float().sum(dim=-1))
-                # self.strategy.print("-----------------------response_length-----------------------")
-                # self.strategy.print("-----------------------total_length-----------------------")
-                # self.strategy.print(attention_mask.float().sum(dim=-1))
-                # self.strategy.print("-----------------------total_length-----------------------")
-                # self.strategy.print("-----------------------batch_rewards-----------------------")
-                # self.strategy.print(batch_rewards)
-                # self.strategy.print("-----------------------batch_rewards-----------------------")
                 sequences = sequences.to("cuda")
                 attention_mask = attention_mask.to("cuda")
                 action_mask = action_mask.to("cuda")
@@ -1018,7 +968,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         
         # vLLM offload when vllm_enable_sleep
         if args.colocate_all_models:
-            print(f"[Experience Maker {rank}] sleeping vLLM engine")
             ref = self.vllm_engines[rank].sleep.remote()
             ray.get(ref)
         else:
@@ -1045,7 +994,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 # if rank == 0:
                     # print(f"[Rank {rank}] [Step {step}] len(all_decoded_texts): {len(all_decoded_texts)}")
                 
-                print(f"[Rank {rank}] [Step {step}] Calculating rewards for all {len(all_decoded_texts)} outputs at once")
                 r_refs = []
                 
                 if self.custom_reward_func:
@@ -1062,9 +1010,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         )
                         r_refs.append(r)
                 
-                print(f"[Rank {rank}] [Step {step}] Waiting for all rewards")
                 all_rewards = ray.get(r_refs)
-                print(f"[Rank {rank}] [Step {step}] Received all rewards")
             
             # Broadcast rewards to all ring attention ranks
             if self.strategy.ring_attn_group is not None:

@@ -90,7 +90,6 @@ class ReferenceModelRayActor(BasePPORole):
         return_output=False,
         logps_allgather=False,
         packed_seq_lens: Optional[list[int]] = None,
-        ref_model=False,
     ) -> torch.Tensor:
         device = torch.cuda.current_device()
         with torch.no_grad():
@@ -102,7 +101,6 @@ class ReferenceModelRayActor(BasePPORole):
                 ring_attn_group=self.strategy.ring_attn_group,
                 logps_allgather=logps_allgather,
                 packed_seq_lens=packed_seq_lens,
-                ref_model=ref_model,
             )
         return log_probs.to("cpu")
 

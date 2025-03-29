@@ -203,7 +203,6 @@ class Actor(nn.Module):
         ring_attn_group: Optional[dist.ProcessGroup] = None,
         logps_allgather=False,
         packed_seq_lens: Optional[list[int]] = None,
-        ref_model: Optional[bool] = False,
     ) -> torch.Tensor:
         """Returns action log probs"""
         if not self.packing_samples:
@@ -222,15 +221,11 @@ class Actor(nn.Module):
             # explicitly ignore attention_mask for packing_samples
             attention_mask = None
 
-        if ref_model:
-            print(f"[Ref Actor] Running forward pass")
         output = self.model(sequences, attention_mask=attention_mask, position_ids=position_ids)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.distributed.barrier()
         # https://github.com/OpenRLHF/OpenRLHF/pull/634
-        if ref_model:
-            print(f"[Ref Actor] Finished forward pass. Now converting logits to float32")
         output["logits"] = output["logits"].to(torch.float32)
 
         if num_actions is None:
