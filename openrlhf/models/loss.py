@@ -74,7 +74,8 @@ class PolicyLoss(nn.Module):
         surr1 = ratio * advantages
         surr2 = ratio.clamp(1 - self.clip_eps, 1 + self.clip_eps_high) * advantages
         loss = -torch.min(surr1, surr2)
-        loss = masked_mean(loss, action_mask, dim=-1).mean()
+        # loss = masked_mean(loss, action_mask, dim=-1).mean()
+        loss = masked_mean(loss, action_mask).mean()
         return loss
 
 

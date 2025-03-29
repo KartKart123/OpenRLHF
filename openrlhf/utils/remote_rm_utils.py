@@ -67,10 +67,6 @@ def remote_rm_fn_refinement(api_url, queries, prompts, labels, metadata = None, 
     scores, tool_answers = request_api_wrapper_refinement(api_url, {"query": queries, "prompts": prompts, "labels": labels, "metadata": metadata}, score_key, tool_key)
     if scores is None or tool_answers is None:
         return torch.zeros(len(queries)), [""] * len(queries)
-def remote_rm_fn_refinement(api_url, queries, prompts, labels, metadata = None, score_key="rewards", tool_key="tool_answers"):
-    scores, tool_answers = request_api_wrapper_refinement(api_url, {"query": queries, "prompts": prompts, "labels": labels, "metadata": metadata}, score_key, tool_key)
-    if scores is None or tool_answers is None:
-        return torch.zeros(len(queries)), [""] * len(queries)
     return torch.tensor(scores), tool_answers
 
 @ray.remote
