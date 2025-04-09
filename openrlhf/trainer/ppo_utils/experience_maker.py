@@ -11,11 +11,11 @@ import torch.nn as nn
 from tqdm import tqdm
 from time import sleep
 
-from openrlhf_refinement.models.actor import Actor
-from openrlhf_refinement.models.ring_attn_utils import pad_sequences, unpad_sequences
-from openrlhf_refinement.models.utils import compute_approx_kl, compute_reward, masked_mean, unpacking_samples
-from openrlhf_refinement.utils.logging_utils import init_logger
-from openrlhf_refinement.utils.remote_rm_utils import remote_rm_fn, remote_rm_fn_ray, remote_rm_fn_ray_refinement
+from openrlhf.models.actor import Actor
+from openrlhf.models.ring_attn_utils import pad_sequences, unpad_sequences
+from openrlhf.models.utils import compute_approx_kl, compute_reward, masked_mean, unpacking_samples
+from openrlhf.utils.logging_utils import init_logger
+from openrlhf.utils.remote_rm_utils import remote_rm_fn, remote_rm_fn_ray, remote_rm_fn_ray_refinement
 
 logger = init_logger(__name__)
 
@@ -1026,7 +1026,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 ref = self.vllm_engines[rank].wake_up.remote()
                 ray.get(ref)
             else:
-                from openrlhf_refinement.trainer.ray.vllm_engine import batch_vllm_engine_call
+                from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
 
                 batch_vllm_engine_call(self.vllm_engines, "wake_up")
                 torch.distributed.barrier()
@@ -1089,7 +1089,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             ray.get(ref)
         else:
             if args.vllm_enable_sleep:
-                from openrlhf_refinement.trainer.ray.vllm_engine import batch_vllm_engine_call
+                from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
                 batch_vllm_engine_call(self.vllm_engines, "sleep")
             torch.distributed.barrier()
         torch.cuda.empty_cache()

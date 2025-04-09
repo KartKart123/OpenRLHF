@@ -6,7 +6,7 @@ import ray
 import torch
 from ray.util.placement_group import placement_group
 
-from openrlhf_refinement.trainer.ray import (
+from openrlhf.trainer.ray import (
     ActorModelRayActor,
     CriticModelRayActor,
     PPORayActorGroup,
@@ -14,7 +14,7 @@ from openrlhf_refinement.trainer.ray import (
     RewardModelRayActor,
     create_vllm_engines,
 )
-from openrlhf_refinement.utils import get_strategy
+from openrlhf.utils import get_strategy
 
 
 # NOTE: reward function for multiple reward models, replace this with your own function!

@@ -9,10 +9,10 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from openrlhf_refinement.models import Actor, GPTLMLoss, PolicyLoss, ValueLoss
-from openrlhf_refinement.models.ring_attn_utils import pad_sequences, unpad_sequences
-from openrlhf_refinement.models.utils import compute_approx_kl, masked_mean, unpacking_samples
-from openrlhf_refinement.utils.distributed_sampler import DistributedSampler
+from openrlhf.models import Actor, GPTLMLoss, PolicyLoss, ValueLoss
+from openrlhf.models.ring_attn_utils import pad_sequences, unpad_sequences
+from openrlhf.models.utils import compute_approx_kl, masked_mean, unpacking_samples
+from openrlhf.utils.distributed_sampler import DistributedSampler
 
 from .ppo_utils import AdaptiveKLController, Experience, FixedKLController, NaiveExperienceMaker, NaiveReplayBuffer
 
