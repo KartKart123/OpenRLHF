@@ -9,10 +9,10 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from openrlhf.models import Actor, GPTLMLoss, PolicyLoss, ValueLoss
-from openrlhf.models.ring_attn_utils import pad_sequences, unpad_sequences
-from openrlhf.models.utils import compute_approx_kl, masked_mean, unpacking_samples
-from openrlhf.utils.distributed_sampler import DistributedSampler
+from openrlhf_refinement.models import Actor, GPTLMLoss, PolicyLoss, ValueLoss
+from openrlhf_refinement.models.ring_attn_utils import pad_sequences, unpad_sequences
+from openrlhf_refinement.models.utils import compute_approx_kl, masked_mean, unpacking_samples
+from openrlhf_refinement.utils.distributed_sampler import DistributedSampler
 
 from .ppo_utils import AdaptiveKLController, Experience, FixedKLController, NaiveExperienceMaker, NaiveReplayBuffer
 
@@ -244,7 +244,7 @@ class PPOTrainer(ABC):
                     #     self.strategy.print(output)
                     self.replay_buffer.append(experience)
 
-                if self.args.advantage_estimator != "group_norm":
+                if self.args.advantage_estimator != "group_norm" or self.args.advantage_estimator != "group_norm_refinement":
                     self.replay_buffer.normalize("advantages", self.strategy)
                 status = self.ppo_train(steps)
                 self.replay_buffer.clear()
@@ -599,4 +599,20 @@ class PPOTrainer(ABC):
             self._save_checkpoint(args, tag, client_states)
 
     def _save_checkpoint(self, args, tag, client_states):
-        raise NotImplementedError("This method should be implemented by the subclass.")
+        if not self.disable_ds_ckpt:
+            self.strategy.save_ckpt(
+                self.actor.model,
+                os.path.join(args.ckpt_path, "_actor"),
+                tag,
+                args.max_ckpt_num,
+                args.max_ckpt_mem,
+                client_states,
+            )
+            if self.critic is not None:
+                self.strategy.save_ckpt(
+                    self.critic, os.path.join(args.ckpt_path, "_critic"), tag, args.max_ckpt_num, args.max_ckpt_mem
+                )
+
+        if self.save_hf_ckpt:
+            save_path = os.path.join(args.ckpt_path, f"{tag}_hf")
+            self.strategy.save_model(self.actor, self.tokenizer, save_path)

@@ -6,7 +6,7 @@ import ray
 import torch
 from ray.util.placement_group import placement_group
 
-from openrlhf.trainer.ray import (
+from openrlhf_refinement.trainer.ray import (
     ActorModelRayActor,
     CriticModelRayActor,
     PPORayActorGroup,
@@ -14,7 +14,7 @@ from openrlhf.trainer.ray import (
     RewardModelRayActor,
     create_vllm_engines,
 )
-from openrlhf.utils import get_strategy
+from openrlhf_refinement.utils import get_strategy
 
 
 # NOTE: reward function for multiple reward models, replace this with your own function!
@@ -180,7 +180,7 @@ def train(args):
         refs.extend(critic_model.async_init_model_from_pretrained(strategy, args.critic_pretrain, max_steps))
         ray.get(refs)
 
-    # train actor and critic model
+    # train actor and critic mdoel
     refs = actor_model.async_fit_actor_model(
         critic_model, ref_model, reward_models, args.remote_rm_url, reward_fn=reward_fn, vllm_engines=vllm_engines
     )
@@ -327,12 +327,6 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--full_determinism",
-        action="store_true",
-        default=False,
-        help="Enable reproducible behavior during distributed training",
-    )
     parser.add_argument("--freezing_actor_steps", type=int, default=-1, help="Used for critic initialization")
     parser.add_argument(
         "--n_samples_per_prompt", type=int, default=1, help="number of responses for each prompt in generation"
@@ -360,9 +354,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--advantage_estimator",
         type=str,
-        choices=["gae", "reinforce", "rloo", "reinforce_baseline", "group_norm"],
+        choices=["gae", "reinforce", "rloo", "reinforce_baseline", "group_norm", "group_norm_refinement"],
         default="gae",
-        help="Choose advantage estimation method: gae, reinforce, rloo, reinforce_baseline, group_norm",
+        help="Choose advantage estimation method: gae, reinforce, rloo, reinforce_baseline, group_norm, group_norm_refinement",
     )
     parser.add_argument("--use_kl_loss", action="store_true", default=False, help="whether to use KL loss from GRPO")
 
@@ -442,7 +436,7 @@ if __name__ == "__main__":
         else:
             args.critic_pretrain = args.pretrain
 
-    if args.advantage_estimator in ["rloo", "reinforce_baseline", "group_norm"]:
+    if args.advantage_estimator in ["rloo", "reinforce_baseline", "group_norm", "group_norm_refinement"]:
         assert args.n_samples_per_prompt > 1, f"{args.advantage_estimator} requires n_samples_per_prompt > 1"
 
     if args.remote_rm_url:

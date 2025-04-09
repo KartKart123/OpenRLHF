@@ -3,7 +3,7 @@ import ray
 import requests
 import torch
 
-from openrlhf.utils.logging_utils import init_logger
+from openrlhf_refinement.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
@@ -58,7 +58,7 @@ def remote_rm_fn(api_url, queries, prompts, labels, metadata = None, score_key="
     score_key: RM score key
     """
     # scores = request_api_wrapper(api_url, {"query": queries, "prompts": prompts, "labels": labels}, score_key)
-    scores, _ = request_api_wrapper(api_url, {"query": queries, "prompts": prompts, "labels": labels, "metadata": metadata}, score_key)
+    scores, tool= request_api_wrapper(api_url, {"query": queries, "prompts": prompts, "labels": labels, "metadata": metadata}, score_key)
     if scores is None:
         return torch.zeros(len(queries))
     return torch.tensor(scores)
