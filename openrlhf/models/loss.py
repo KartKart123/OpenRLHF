@@ -58,11 +58,12 @@ class PolicyLoss(nn.Module):
     Policy Loss for PPO
     """
 
-    def __init__(self, clip_eps: float = 0.2, clip_eps_high: float = 0.2) -> None:
+    def __init__(self, clip_eps: float = 0.2, clip_eps_high: float = 0.2, max_tokens: int = 16384) -> None:
         super().__init__()
         self.clip_eps = clip_eps
         self.clip_eps_high = clip_eps_high
-
+        self.max_tokens = max_tokens
+        
     def forward(
         self,
         log_probs: torch.Tensor,
@@ -74,7 +75,10 @@ class PolicyLoss(nn.Module):
         surr1 = ratio * advantages
         surr2 = ratio.clamp(1 - self.clip_eps, 1 + self.clip_eps_high) * advantages
         loss = -torch.min(surr1, surr2)
-        loss = masked_mean(loss, action_mask, dim=-1).mean()
+        # Dr. GRPO loss
+        loss = loss.sum(dim=-1) / self.max_tokens
+        loss = loss.mean()
+        # loss = masked_mean(loss, action_mask, dim=-1).mean()
         # loss = masked_mean(loss, action_mask).mean()
         return loss
 

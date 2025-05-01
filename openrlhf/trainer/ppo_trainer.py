@@ -127,7 +127,7 @@ class PPOTrainer(ABC):
         self.actor_scheduler = actor_scheduler
         self.critic_scheduler = critic_scheduler
 
-        self.actor_loss_fn = PolicyLoss(eps_clip, eps_clip_high)
+        self.actor_loss_fn = PolicyLoss(eps_clip, eps_clip_high, max_tokens=self.args.generate_max_len)
         self.critic_loss_fn = ValueLoss(value_clip)
         self.ptx_loss_fn = GPTLMLoss()
 

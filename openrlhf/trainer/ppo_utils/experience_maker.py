@@ -433,17 +433,15 @@ class NaiveExperienceMaker(ABC):
         elif args.advantage_estimator == "group_norm":
             rewards = torch.cat([experience.info["reward"] for experience in experiences]) 
             rewards = rewards.reshape(-1, args.n_samples_per_prompt).to(device="cuda")
-            rewards = (rewards - rewards.mean(-1, keepdim=True)) / (rewards.std(-1, keepdim=True) + 1e-9)
+            # rewards = (rewards - rewards.mean(-1, keepdim=True)) / (rewards.std(-1, keepdim=True) + 1e-9)
             # NOTE: Dr. GRPO
-            # rewards = rewards - rewards.mean(-1, keepdim=True)
+            rewards = rewards - rewards.mean(-1, keepdim=True)
             rewards = rewards.reshape(-1).to(device="cpu").chunk(len(experiences))
             return experiences, rewards
         elif args.advantage_estimator == "group_norm_refinement":
             rewards = torch.cat([experience.info["reward"] for experience in experiences])
-            print("Received rewards: ", rewards)
             rewards = rewards.reshape(-1, args.n_samples_per_prompt // args.num_passes, args.num_passes).to(device="cuda")
             rewards = (rewards - rewards.mean(dim=1, keepdim=True)) / (rewards.std(dim=1, keepdim=True) + 1e-9)
-            print("Normalized rewards: ", rewards)
             rewards = rewards.reshape(-1).to(device="cpu").chunk(len(experiences))
             return experiences, rewards
 
@@ -634,7 +632,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             torch.distributed.barrier()
             print(f"[Rank {rank}] [Step {step}] Running initial model")
             base_action_log_probs_ref = self.initial_model.forward.remote(
-                sequences_cpu, num_actions, attention_mask_cpu, logps_allgather=True, packed_seq_lens=packed_seq_lens, ref_model=True
+                sequences_cpu, num_actions, attention_mask_cpu, logps_allgather=True, packed_seq_lens=packed_seq_lens
             )
 
             if args.colocate_actor_ref or args.colocate_all_models:
@@ -889,7 +887,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # apply gamma to all_rewards
         for i in reversed(range(args.num_passes - 1)):
             all_rewards[:, i] += args.refinement_gamma * all_rewards[:, i + 1] 
-
+            # all_rewards[:, i] = torch.maximum(all_rewards[:, i], args.refinement_gamma * all_rewards[:, i + 1])
+        
         all_messages = sum(all_messages, [])
         all_labels = sum([[label] * args.num_passes for label in all_labels], [])
         all_outputs = sum(all_outputs, [])
