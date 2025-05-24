@@ -431,12 +431,40 @@ class NaiveExperienceMaker(ABC):
             rewards = rewards.reshape(-1).to(device="cpu").chunk(len(experiences))
             return experiences, rewards
         elif args.advantage_estimator == "group_norm":
-            rewards = torch.cat([experience.info["reward"] for experience in experiences]) 
+            assert len(experiences) == 1, (
+                   "Group norm advantage estimator only supports one task. "
+            )
+            rewards = torch.cat([experience.info["reward"] for experience in experiences])
             rewards = rewards.reshape(-1, args.n_samples_per_prompt).to(device="cuda")
-            # rewards = (rewards - rewards.mean(-1, keepdim=True)) / (rewards.std(-1, keepdim=True) + 1e-9)
-            # NOTE: Dr. GRPO
-            rewards = rewards - rewards.mean(-1, keepdim=True)
-            rewards = rewards.reshape(-1).to(device="cpu").chunk(len(experiences))
+            # print(f"Rewards before normalization: {rewards}")
+            
+            # Create mask for non-nan values
+            mask = ~torch.isnan(rewards)
+            # print(f"Mask: {mask}")
+            for experience in experiences:
+                experience_mask = ~torch.isnan(experience.info["reward"])
+                experience.info["reward"] = experience.info["reward"][experience_mask]
+                # print(f"[process_experiences] experience.info['reward']: {experience.info['reward']}, experience_mask: {experience_mask}")
+            
+            # Calculate mean using nanmean
+            mean = torch.nanmean(rewards, dim=-1, keepdim=True)
+            
+            # Calculate std manually with masking
+            n = mask.sum(dim=-1, keepdim=True)
+            masked_diff = torch.where(mask, (rewards - mean) ** 2, torch.tensor(0.0, device=rewards.device))
+            # Clamp n-1 to minimum of 1 to avoid division by zero
+            std = torch.sqrt(masked_diff.sum(dim=-1, keepdim=True) / (n - 1).clamp(min=1.0))
+            
+            # print(f"Mean: {mean}, Std: {std}")
+            rewards = (rewards - mean) / (std + 1e-9)
+            
+            # print(f"Rewards after normalization: {rewards}")
+            rewards = rewards[mask].reshape(-1)
+            rewards = rewards.to(device="cpu").chunk(len(experiences))
+            
+            # rank = torch.distributed.get_rank()
+            # print(f"DEDUP: [Rank {rank}] Rewards after removing nan: {rewards}")
+            
             return experiences, rewards
         elif args.advantage_estimator == "group_norm_refinement":
             rewards = torch.cat([experience.info["reward"] for experience in experiences])
@@ -893,6 +921,14 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         all_labels = sum([[label] * args.num_passes for label in all_labels], [])
         all_outputs = sum(all_outputs, [])
         all_rewards = [all_rewards.reshape(-1)]
+        
+        if args.overlong_filtering:
+            mask = all_rewards[0] > -10.0
+        else:
+            mask = torch.ones_like(all_rewards[0], dtype=torch.bool)
+        rewards = [all_rewards[0].masked_fill(~mask, float('nan'))]
+
+        print(f"DEDUP: [Rank {rank}] Mask: {mask}, Rewards: {rewards}")
 
         samples_list = []
         for i in range(0, len(all_outputs), args.micro_rollout_batch_size):
@@ -900,10 +936,11 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             prompts = all_messages[i : i + self.strategy.args.micro_rollout_batch_size]
             labels = all_labels[i : i + self.strategy.args.micro_rollout_batch_size]
 
-            # Extract relevant rewards for this batch
-            batch_rewards = None
-            if all_rewards is not None:
-                batch_rewards = [reward[i:i + self.strategy.args.micro_rollout_batch_size] for reward in all_rewards]
+            # Apply mask to filter out invalid samples
+            mask_slice = mask[i:i + self.strategy.args.micro_rollout_batch_size]
+            outputs = [out for out, m in zip(outputs, mask_slice) if m]
+            prompts = [p for p, m in zip(prompts, mask_slice) if m] 
+            labels = [l for l, m in zip(labels, mask_slice) if m]
             
             if not self.packing_samples:
                 # NOTE: concat all outputs to following format:
@@ -952,7 +989,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         pad_len=None,
                         rank=rank,
                         step=step,
-                        rewards=batch_rewards
+                        rewards=rewards
                     )
                 )
             else:
@@ -1004,7 +1041,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         pad_len=pad_len,
                         rank=rank,
                         step=step,
-                        rewards=batch_rewards
+                        rewards=rewards
                     )
                 )
         return samples_list

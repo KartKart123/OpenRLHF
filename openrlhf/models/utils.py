@@ -85,6 +85,7 @@ def compute_reward(
             kl_reward[action_len - 1] += r[i]
             reward.append(kl_reward)
 
+    # print("compute_reward: reward=", reward)
     return reward
 
 

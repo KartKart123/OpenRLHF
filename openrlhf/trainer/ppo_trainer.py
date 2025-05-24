@@ -244,9 +244,13 @@ class PPOTrainer(ABC):
                     #     self.strategy.print(output)
                     self.replay_buffer.append(experience)
 
-                if self.args.advantage_estimator != "group_norm" or self.args.advantage_estimator != "group_norm_refinement":
+                if self.args.advantage_estimator != "group_norm" and self.args.advantage_estimator != "group_norm_refinement":
                     self.replay_buffer.normalize("advantages", self.strategy)
-                status = self.ppo_train(steps)
+                assert args.micro_train_batch_size == 1, "Only micro train batch size = 1 supported for now"
+                num_train_samples = args.n_samples_per_prompt * (args.rollout_batch_size // args.actor_num_gpus_per_node // args.actor_num_nodes)
+                print(f"[PPO Trainer fit] Num train samples: {num_train_samples}")
+                status = self.ppo_train(steps, num_train_samples)
+                # print(f"DEDUP: [PPO Trainer fit] Status: {status}")
                 self.replay_buffer.clear()
 
                 if "kl" in status:
@@ -255,42 +259,75 @@ class PPOTrainer(ABC):
 
                 # logs/checkpoints
                 client_states = {"consumed_samples": steps * args.rollout_batch_size}
+                # print(f"DEDUP: [PPO Trainer fit] Saving logs and checkpoints")
                 self.save_logs_and_checkpoints(args, steps, pbar, status, client_states)
 
                 pbar.update()
                 steps = steps + 1
+                # print(f"DEDUP: [PPO Trainer fit] Steps: {steps}")
 
         if self._wandb is not None and self.strategy.is_rank_0():
             self._wandb.finish()
         if self._tensorboard is not None and self.strategy.is_rank_0():
             self._tensorboard.close()
 
-    def ppo_train(self, global_steps=0):
+    def ppo_train(self, global_steps, num_train_samples):
         # print(f"[PPO Trainer] Running PPO_train")
         torch.cuda.empty_cache()
         # replay buffer may be empty at first, we should rebuild at each training
-        dataloader = DataLoader(
-            self.replay_buffer,
-            batch_size=self.replay_buffer.sample_batch_size,
-            shuffle=False if self.strategy.ring_attn_group is not None else True,
-            drop_last=True,
-            pin_memory=self.dataloader_pin_memory,
-            collate_fn=self.replay_buffer.collate_fn,
-        )
         device = torch.cuda.current_device()
 
         status_list = []
         status_mean = {}
         grad_norm_list = []
+
+        # loss scale to account for dummy training samples
+        num_real_samples = len(self.replay_buffer)
+        count_real_samples = self.strategy.all_reduce(num_real_samples, "sum")
+        gradient_accumulation_steps = self.strategy.accumulated_gradient
+        world_size = self.strategy.world_size
+        loss_scale = world_size * gradient_accumulation_steps / count_real_samples if count_real_samples > 0 else 1.0
+        rank = torch.distributed.get_rank()
+        print(f"[PPO Trainer] Rank {rank} Count real samples: {count_real_samples}")
+        # print(f"[PPO Trainer] Rank {rank} Gradient accumulation steps: {gradient_accumulation_steps}")
+        # print(f"[PPO Trainer] Rank {rank} World size: {world_size}")
+        print(f"[PPO Trainer] Rank {rank} Loss scale: {loss_scale}")
+        # print(f"DEDUP: [PPO Trainer] Rank {rank} Num real samples: {num_real_samples}")
+
+        # Create dataloader once outside epoch loop
+        dataloader = DataLoader(
+            self.replay_buffer,
+            batch_size=self.replay_buffer.sample_batch_size,
+            shuffle=False if self.strategy.ring_attn_group is not None else True,
+            drop_last=False,
+            pin_memory=self.dataloader_pin_memory,
+            collate_fn=self.replay_buffer.collate_fn,
+        )
+
         for epoch in range(self.max_epochs):
             pbar = tqdm(
                 dataloader,
                 desc=f"Train epoch [{epoch + 1}/{self.max_epochs}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for experience in pbar:
-                experience.to_device(device)
-                status = self.training_step(experience, global_steps, epoch)
+            dataloader_iter = iter(dataloader)
+            dummy_experience = None
+            dummy = False
+            for i in range(num_train_samples):
+                try:
+                    experience = next(dataloader_iter)
+                    experience.to_device(device)
+                    if i == 0:
+                        # Use first experience as dummy experience 
+                        dummy_experience = experience
+                except StopIteration:
+                    # print(f"DEDUP: [PPO Trainer] No more experiences")
+                    experience = dummy_experience
+                    dummy = True
+
+                # print(f"DEDUP: [PPO Trainer] Running training step with experience")
+                status = self.training_step(experience, global_steps, epoch, loss_scale=loss_scale, dummy=dummy)
+                # print(f"DEDUP: [PPO Trainer] Status: {status}")
 
                 # for DP
                 # weighted mean for kl
@@ -335,19 +372,32 @@ class PPOTrainer(ABC):
                 status_mean[k] /= len(status_list)
             status_mean["grad_norm"] = sum(grad_norm_list) / len(grad_norm_list)
         torch.cuda.empty_cache()
+        # print(f"[PPO Trainer] Status mean: {status_mean}")
         return status_mean
 
-    def training_step(self, experience: Experience, global_steps, epoch: int) -> Dict[str, float]:
+    def training_step(self, experience: Experience = None, global_steps: int = 0, epoch: int = 0, dummy: bool = False, loss_scale: float = 1.0) -> Dict[str, float]:
         status = {}
         if global_steps > self.freezing_actor_steps:
-            status = self.training_step_actor(experience, epoch)
+            status = self.training_step_actor(experience, global_steps, epoch, dummy=dummy, loss_scale=loss_scale)
         if self.critic is not None:
             status.update(self.training_step_critic(experience))
         return status
 
-    def training_step_actor(self, experience: Experience, epoch: int) -> Dict[str, float]:
+    def training_step_actor(self, experience: Experience = None, global_steps: int = 0, epoch: int = 0, dummy: bool = False, loss_scale: float = 1.0) -> Dict[str, float]:
         # print(f"[PPO Trainer] Running actor training step. Epoch: {epoch}")
         self.actor.train()
+        # if dummy:
+        #     # Do dummy backward and optimizer step if no experience
+        #     print(f"DEDUP: [PPO Trainer] Running dummy backward and optimizer step")
+        #     # self.actor.zero_grad()
+        #     dummy_losses = torch.stack([p.sum() * 0 for p in self.actor.model.parameters()])
+        #     print(self.actor.model.parameters())
+        #     print(f"DEDUP: [PPO Trainer] Dummy losses: {dummy_losses}")
+        #     dummy_loss = dummy_losses.sum()
+        #     print(f"DEDUP: [PPO Trainer] Dummy loss: {dummy_loss}")
+        #     self.strategy.backward(dummy_loss, self.actor, self.actor_optim)
+        #     self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
+        #     return {}
 
         # TODO: this is a bad indicator to say that data is packed...
         if isinstance(experience.sequences, list):
@@ -379,6 +429,7 @@ class PPOTrainer(ABC):
                 base_action_log_probs = experience.base_action_log_probs
                 # print("Base action log probs shape:", base_action_log_probs.shape)
 
+        # print(f"DEDUP: [PPO Trainer] Running actor forward pass with sequences: {sequences.shape}, advantages: {advantages.shape}, packed_seq_lens: {packed_seq_lens}")
         # actor loss
         # print("[PPO Trainer] Running actor forward pass")
         action_log_probs, output = self.actor(
@@ -446,8 +497,12 @@ class PPOTrainer(ABC):
             aux_loss = output.aux_loss
         else:
             aux_loss = 0
+        
         loss = actor_loss + aux_loss * self.args.aux_loss_coef + kl_loss * self.kl_ctl.value
-        # print("[PPO Trainer] Running actor backward pass")
+        loss *= loss_scale
+        if dummy:
+            loss *= 0
+        # print(f"DEDUP: [PPO Trainer] Running actor backward pass, loss: {loss}; dummy: {dummy}")
         self.strategy.backward(loss, self.actor, self.actor_optim)
 
         # ptx loss

@@ -121,7 +121,7 @@ class ActorPPOTrainer(PPOTrainer):
 
         torch.distributed.barrier()
 
-    def ppo_train(self, global_steps):
+    def ppo_train(self, global_steps, num_train_samples):
         # 1. ensure all experience makers done
         self.experience_maker.flush()
         torch.distributed.barrier()
@@ -148,7 +148,7 @@ class ActorPPOTrainer(PPOTrainer):
             if self.strategy.args.deepspeed_enable_sleep:
                 self.reload_states()
 
-            status.update(super().ppo_train(global_steps))
+            status.update(super().ppo_train(global_steps, num_train_samples))
 
             if self.strategy.args.deepspeed_enable_sleep:
                 self.offload_states()
@@ -176,8 +176,8 @@ class ActorPPOTrainer(PPOTrainer):
 
         return status
 
-    def training_step(self, experience: Experience, global_steps, epoch: int) -> Dict[str, float]:
-        return self.training_step_actor(experience, epoch)
+    def training_step(self, experience: Experience, global_steps: int, epoch: int, dummy: bool = False, loss_scale: float = 1.0) -> Dict[str, float]:
+        return self.training_step_actor(experience, global_steps, epoch, dummy, loss_scale)
 
     def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)

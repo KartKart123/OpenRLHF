@@ -199,6 +199,7 @@ if __name__ == "__main__":
     parser.add_argument("--refinement", action="store_true", default=False, help="Use refinement")
     parser.add_argument("--num_passes", type=int, default=1, help="number of refinement steps for each prompt")
     parser.add_argument("--refinement_gamma", type=float, default=0, help="gamma for refinement")
+    parser.add_argument("--overlong_filtering", action="store_true", default=False, help="Use overlong filtering")
 
     # Ray and vLLM
     parser.add_argument("--ref_num_nodes", type=int, default=1, help="number of nodes for reference")
